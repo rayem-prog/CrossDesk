@@ -34,6 +34,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use super::{Edge, ServerConfig};
 use crate::clipboard::{Clipboard, ClipboardApi};
+use crate::clipboard_sync::{ClipboardSyncState, clipboard_summary};
 use crate::file_transfer;
 use crate::platform::{ConnectionProfile, Platform};
 use crate::pointer::{MotionAction, PointerRouter};
@@ -50,7 +51,6 @@ const INPUT_BATCH_LIMIT: usize = 64;
 const DROP_STRIP_WIDTH: i32 = 18;
 const DROP_STRIP_ALPHA: u8 = 48;
 const CURSOR_LOCK_RADIUS: i32 = 24;
-const REMOTE_CLIPBOARD_SUPPRESS_WINDOW: Duration = Duration::from_millis(1200);
 const WM_DESKBRIDGE_STOP: u32 = WM_APP + 0x51;
 
 static CAPTURE_STATE: OnceLock<Arc<Mutex<CaptureState>>> = OnceLock::new();
@@ -283,89 +283,11 @@ fn send_clipboard_payload(
     }
 }
 
-#[derive(Default)]
-struct ClipboardSyncState {
-    last_observed: Option<Vec<u8>>,
-    suppress_next_kind: Option<ClipboardKind>,
-    suppress_until: Option<Instant>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ClipboardKind {
-    Text,
-    Bitmap,
-    Files,
-}
-
-impl ClipboardSyncState {
-    fn accept_local_change(&mut self, payload: &ClipboardPayload, encoded: Vec<u8>) -> bool {
-        if self.last_observed.as_ref() == Some(&encoded) {
-            return false;
-        }
-
-        let kind = ClipboardKind::from_payload(payload);
-        if self.should_suppress(kind) {
-            eprintln!("suppressed remote clipboard echo");
-            self.last_observed = Some(encoded);
-            return false;
-        }
-
-        self.clear_suppression();
-        self.last_observed = Some(encoded);
-        true
-    }
-
-    fn note_remote_write(&mut self, payload: &ClipboardPayload) {
-        self.last_observed = Some(protocol::encode_clipboard(payload));
-        self.suppress_next_kind = Some(ClipboardKind::from_payload(payload));
-        self.suppress_until = Some(Instant::now() + REMOTE_CLIPBOARD_SUPPRESS_WINDOW);
-    }
-
-    fn should_suppress(&mut self, kind: ClipboardKind) -> bool {
-        if self.suppress_next_kind != Some(kind) {
-            return false;
-        }
-        if self
-            .suppress_until
-            .map(|until| Instant::now() <= until)
-            .unwrap_or(false)
-        {
-            self.clear_suppression();
-            return true;
-        }
-        self.clear_suppression();
-        false
-    }
-
-    fn clear_suppression(&mut self) {
-        self.suppress_next_kind = None;
-        self.suppress_until = None;
-    }
-}
-
-impl ClipboardKind {
-    fn from_payload(payload: &ClipboardPayload) -> Self {
-        match payload {
-            ClipboardPayload::Text(_) => Self::Text,
-            ClipboardPayload::Bitmap(_) => Self::Bitmap,
-            ClipboardPayload::Files(_) => Self::Files,
-        }
-    }
-}
-
 fn note_remote_clipboard(
     clipboard_state: &Arc<Mutex<ClipboardSyncState>>,
     payload: &ClipboardPayload,
 ) {
     clipboard_state.lock().unwrap().note_remote_write(payload);
-}
-
-fn clipboard_summary(payload: &ClipboardPayload) -> String {
-    match payload {
-        ClipboardPayload::Text(text) => format!("text ({} chars)", text.chars().count()),
-        ClipboardPayload::Bitmap(bitmap) => format!("image ({} bytes)", bitmap.len()),
-        ClipboardPayload::Files(files) => format!("files ({} item(s))", files.len()),
-    }
 }
 
 struct Hooks {
@@ -1113,24 +1035,24 @@ fn write_input_event(writer: &SharedWriter, event: InputEvent, log: &mut InputSe
 }
 
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 {
-        if let Some(state) = CAPTURE_STATE.get() {
-            let hook = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
-            if state.lock().unwrap().handle_keyboard(wparam as u32, hook) {
-                return 1;
-            }
+    if code == HC_ACTION as i32
+        && let Some(state) = CAPTURE_STATE.get()
+    {
+        let hook = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
+        if state.lock().unwrap().handle_keyboard(wparam as u32, hook) {
+            return 1;
         }
     }
     unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) }
 }
 
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 {
-        if let Some(state) = CAPTURE_STATE.get() {
-            let hook = unsafe { &*(lparam as *const MSLLHOOKSTRUCT) };
-            if state.lock().unwrap().handle_mouse(wparam as u32, hook) {
-                return 1;
-            }
+    if code == HC_ACTION as i32
+        && let Some(state) = CAPTURE_STATE.get()
+    {
+        let hook = unsafe { &*(lparam as *const MSLLHOOKSTRUCT) };
+        if state.lock().unwrap().handle_mouse(wparam as u32, hook) {
+            return 1;
         }
     }
     unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) }

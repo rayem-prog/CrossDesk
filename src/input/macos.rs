@@ -59,6 +59,7 @@ unsafe extern "C" {
 const COMMAND_KEYCODE: u16 = 55;
 const RIGHT_COMMAND_KEYCODE: u16 = 54;
 const CONTROL_KEYCODE: u16 = 59;
+const RIGHT_CONTROL_KEYCODE: u16 = 62;
 const OPTION_KEYCODE: u16 = 58;
 const RIGHT_OPTION_KEYCODE: u16 = 61;
 const LEFT_SHIFT_KEYCODE: u16 = 56;
@@ -69,6 +70,8 @@ const SPACE_KEYCODE: u16 = 49;
 const NUMBER_4_KEYCODE: u16 = 21;
 const PRINT_SCREEN_SCANCODE: u16 = 311;
 const CAPS_LOCK_SCANCODE: u16 = 58;
+const CONTROL_OR_COMMAND_SCANCODE: u16 = 29;
+const RIGHT_CONTROL_OR_COMMAND_SCANCODE: u16 = 285;
 const LEFT_SHIFT_SCANCODE: u16 = 42;
 const RIGHT_SHIFT_SCANCODE: u16 = 54;
 const BACKSPACE_INITIAL_REPEAT_INTERVAL: Duration = Duration::from_millis(60);
@@ -964,145 +967,136 @@ fn is_shift_scancode(scancode: u16) -> bool {
     matches!(scancode, LEFT_SHIFT_SCANCODE | RIGHT_SHIFT_SCANCODE)
 }
 
+const MACOS_LETTER_KEYCODES: &[u16] = &[
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 31, 32, 34, 35, 37, 38, 40, 45, 46,
+];
+
 fn is_letter_keycode(keycode: u16) -> bool {
-    matches!(
-        keycode,
-        0 | 1
-            | 2
-            | 3
-            | 4
-            | 5
-            | 6
-            | 7
-            | 8
-            | 9
-            | 11
-            | 12
-            | 13
-            | 14
-            | 15
-            | 16
-            | 17
-            | 31
-            | 32
-            | 34
-            | 35
-            | 37
-            | 38
-            | 40
-            | 45
-            | 46
-    )
+    MACOS_LETTER_KEYCODES.contains(&keycode)
 }
 
+// Translation table from PC set-1 scancodes to macOS virtual keycodes.
+// The numeric pairs are external OS codes, so keep them grouped here as data
+// rather than mixing them into event routing logic.
+const MACOS_SCANCODE_TO_KEYCODE: &[(u16, u16)] = &[
+    (1, 53),
+    (2, 18),
+    (3, 19),
+    (4, 20),
+    (5, NUMBER_4_KEYCODE),
+    (6, 23),
+    (7, 22),
+    (8, 26),
+    (9, 28),
+    (10, 25),
+    (11, 29),
+    (12, 27),
+    (13, 24),
+    (14, 51),
+    (15, 48),
+    (16, 12),
+    (17, 13),
+    (18, 14),
+    (19, 15),
+    (20, 17),
+    (21, 16),
+    (22, 32),
+    (23, 34),
+    (24, 31),
+    (25, 35),
+    (26, 33),
+    (27, 30),
+    (28, 36),
+    (29, COMMAND_KEYCODE),
+    (30, 0),
+    (31, 1),
+    (32, 2),
+    (33, 3),
+    (34, 5),
+    (35, 4),
+    (36, 38),
+    (37, 40),
+    (38, 37),
+    (39, 41),
+    (40, 39),
+    (41, 50),
+    (42, LEFT_SHIFT_KEYCODE),
+    (43, 42),
+    (44, 6),
+    (45, 7),
+    (46, 8),
+    (47, 9),
+    (48, 11),
+    (49, 45),
+    (50, 46),
+    (51, 43),
+    (52, 47),
+    (53, 44),
+    (54, RIGHT_SHIFT_KEYCODE),
+    (55, 67),
+    (56, OPTION_KEYCODE),
+    (57, SPACE_KEYCODE),
+    (58, 57),
+    (59, 122),
+    (60, 120),
+    (61, 99),
+    (62, 118),
+    (63, 96),
+    (64, 97),
+    (65, 98),
+    (66, 100),
+    (67, 101),
+    (68, 109),
+    (69, 71),
+    (71, 89),
+    (72, 91),
+    (73, 92),
+    (74, 78),
+    (75, 86),
+    (76, 87),
+    (77, 88),
+    (78, 69),
+    (79, 83),
+    (80, 84),
+    (81, 85),
+    (82, 82),
+    (83, 65),
+    (87, 103),
+    (88, 111),
+    (91, COMMAND_KEYCODE),
+    (92, RIGHT_COMMAND_KEYCODE),
+    (284, 76),
+    (285, RIGHT_COMMAND_KEYCODE),
+    (309, 75),
+    (312, RIGHT_OPTION_KEYCODE),
+    (327, 115),
+    (328, 126),
+    (329, 116),
+    (331, 123),
+    (333, 124),
+    (335, 119),
+    (336, 125),
+    (337, 121),
+    (338, 114),
+    (339, 117),
+    (347, COMMAND_KEYCODE),
+    (348, RIGHT_COMMAND_KEYCODE),
+];
+
 fn scancode_to_macos_key_for_profile(scancode: u16, profile: ConnectionProfile) -> Option<u16> {
-    Some(match scancode {
-        1 => 53,
-        2 => 18,
-        3 => 19,
-        4 => 20,
-        5 => NUMBER_4_KEYCODE,
-        6 => 23,
-        7 => 22,
-        8 => 26,
-        9 => 28,
-        10 => 25,
-        11 => 29,
-        12 => 27,
-        13 => 24,
-        14 => 51,
-        15 => 48,
-        16 => 12,
-        17 => 13,
-        18 => 14,
-        19 => 15,
-        20 => 17,
-        21 => 16,
-        22 => 32,
-        23 => 34,
-        24 => 31,
-        25 => 35,
-        26 => 33,
-        27 => 30,
-        28 => 36,
-        29 if matches!(profile, ConnectionProfile::MacOSToMacOS) => CONTROL_KEYCODE,
-        29 => COMMAND_KEYCODE,
-        30 => 0,
-        31 => 1,
-        32 => 2,
-        33 => 3,
-        34 => 5,
-        35 => 4,
-        36 => 38,
-        37 => 40,
-        38 => 37,
-        39 => 41,
-        40 => 39,
-        41 => 50,
-        42 => LEFT_SHIFT_KEYCODE,
-        43 => 42,
-        44 => 6,
-        45 => 7,
-        46 => 8,
-        47 => 9,
-        48 => 11,
-        49 => 45,
-        50 => 46,
-        51 => 43,
-        52 => 47,
-        53 => 44,
-        54 => RIGHT_SHIFT_KEYCODE,
-        55 => 67,
-        56 => OPTION_KEYCODE,
-        57 => SPACE_KEYCODE,
-        58 => 57,
-        59 => 122,
-        60 => 120,
-        61 => 99,
-        62 => 118,
-        63 => 96,
-        64 => 97,
-        65 => 98,
-        66 => 100,
-        67 => 101,
-        68 => 109,
-        69 => 71,
-        71 => 89,
-        72 => 91,
-        73 => 92,
-        74 => 78,
-        75 => 86,
-        76 => 87,
-        77 => 88,
-        78 => 69,
-        79 => 83,
-        80 => 84,
-        81 => 85,
-        82 => 82,
-        83 => 65,
-        91 => COMMAND_KEYCODE,
-        92 => RIGHT_COMMAND_KEYCODE,
-        87 => 103,
-        88 => 111,
-        284 => 76,
-        285 if matches!(profile, ConnectionProfile::MacOSToMacOS) => 62,
-        285 => RIGHT_COMMAND_KEYCODE,
-        309 => 75,
-        312 => RIGHT_OPTION_KEYCODE,
-        327 => 115,
-        328 => 126,
-        329 => 116,
-        331 => 123,
-        333 => 124,
-        335 => 119,
-        336 => 125,
-        337 => 121,
-        338 => 114,
-        339 => 117,
-        347 => COMMAND_KEYCODE,
-        348 => RIGHT_COMMAND_KEYCODE,
-        _ => return None,
-    })
+    if matches!(profile, ConnectionProfile::MacOSToMacOS) {
+        match scancode {
+            CONTROL_OR_COMMAND_SCANCODE => return Some(CONTROL_KEYCODE),
+            RIGHT_CONTROL_OR_COMMAND_SCANCODE => return Some(RIGHT_CONTROL_KEYCODE),
+            _ => {}
+        }
+    }
+
+    MACOS_SCANCODE_TO_KEYCODE
+        .iter()
+        .find_map(|(pc_scancode, macos_keycode)| {
+            (*pc_scancode == scancode).then_some(*macos_keycode)
+        })
 }
 
 fn flags_for_pressed_keys(keys: &HashSet<u16>) -> EventFlags {

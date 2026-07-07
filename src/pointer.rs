@@ -16,11 +16,14 @@ pub enum MotionAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PointerPhase {
+    // Local is armed only after the pointer has moved away from the edge once;
+    // this avoids immediately bouncing back to the remote screen after return.
     Local {
         armed: bool,
     },
     Remote {
-        return_push: i32,
+        // Distance pushed toward the local screen while already touching the return edge.
+        accumulated_return_push: i32,
         return_armed: bool,
     },
 }
@@ -109,7 +112,7 @@ impl PointerRouter {
             ),
         };
         self.phase = PointerPhase::Remote {
-            return_push: 0,
+            accumulated_return_push: 0,
             return_armed: false,
         };
         MotionAction::EnterRemote {
@@ -120,31 +123,28 @@ impl PointerRouter {
 
     pub fn observe_remote_motion(&mut self, dx: i32, dy: i32, allow_return: bool) -> MotionAction {
         let PointerPhase::Remote {
-            mut return_push,
+            mut accumulated_return_push,
             mut return_armed,
         } = self.phase
         else {
             return MotionAction::Local;
         };
 
-        let pushing_home = match self.edge {
+        let moving_toward_local_edge = match self.edge {
             Edge::Right => dx < 0,
             Edge::Left => dx > 0,
         };
-        let at_home_edge = match self.edge {
-            Edge::Right => self.remote_pos.0 <= RETURN_EDGE_MARGIN,
-            Edge::Left => {
-                self.remote_pos.0 >= self.remote_size.0.saturating_sub(1 + RETURN_EDGE_MARGIN)
-            }
-        };
+        let at_local_edge_before_move = self.is_remote_at_return_edge();
 
-        if return_armed && allow_return && pushing_home && at_home_edge {
-            return_push = return_push.saturating_add(dx.saturating_abs());
-            if return_push >= RETURN_PUSH_THRESHOLD {
+        // Returning requires both being on the return edge and continuing to push
+        // toward the local screen, which prevents accidental returns during normal motion.
+        if return_armed && allow_return && moving_toward_local_edge && at_local_edge_before_move {
+            accumulated_return_push = accumulated_return_push.saturating_add(dx.saturating_abs());
+            if accumulated_return_push >= RETURN_PUSH_THRESHOLD {
                 return self.return_to_local();
             }
         } else {
-            return_push = 0;
+            accumulated_return_push = 0;
         }
 
         self.remote_pos.0 = clamp(
@@ -157,17 +157,12 @@ impl PointerRouter {
             0,
             self.remote_size.1 - 1,
         );
-        let at_home_edge_after = match self.edge {
-            Edge::Right => self.remote_pos.0 <= RETURN_EDGE_MARGIN,
-            Edge::Left => {
-                self.remote_pos.0 >= self.remote_size.0.saturating_sub(1 + RETURN_EDGE_MARGIN)
-            }
-        };
-        if !at_home_edge_after {
+        let at_local_edge_after_move = self.is_remote_at_return_edge();
+        if !at_local_edge_after_move {
             return_armed = true;
         }
         self.phase = PointerPhase::Remote {
-            return_push,
+            accumulated_return_push,
             return_armed,
         };
         MotionAction::MoveRemote { dx, dy }
@@ -211,6 +206,15 @@ impl PointerRouter {
         match self.edge {
             Edge::Right => x >= self.local_size.0.saturating_sub(EDGE_TRIGGER_MARGIN),
             Edge::Left => x <= EDGE_TRIGGER_MARGIN,
+        }
+    }
+
+    fn is_remote_at_return_edge(&self) -> bool {
+        match self.edge {
+            Edge::Right => self.remote_pos.0 <= RETURN_EDGE_MARGIN,
+            Edge::Left => {
+                self.remote_pos.0 >= self.remote_size.0.saturating_sub(1 + RETURN_EDGE_MARGIN)
+            }
         }
     }
 

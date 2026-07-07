@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use super::macos_capture::{KeyboardRouter, ModifierMapping};
 use super::{Edge, ServerConfig};
 use crate::clipboard::{Clipboard, ClipboardApi};
+use crate::clipboard_sync::{ClipboardSyncState, clipboard_summary};
 use crate::file_transfer;
 use crate::platform::{ConnectionProfile, Platform};
 use crate::pointer::{MotionAction, PointerRouter};
@@ -17,7 +18,6 @@ use crate::transport::SharedWriter;
 
 const DEFAULT_REMOTE_WIDTH: i32 = 1366;
 const DEFAULT_REMOTE_HEIGHT: i32 = 768;
-const REMOTE_CLIPBOARD_SUPPRESS_WINDOW: Duration = Duration::from_millis(1200);
 const DEFAULT_INPUT_FLUSH_MS: u64 = 4;
 const REMOTE_CURSOR_REPIN_INTERVAL: Duration = Duration::from_millis(16);
 const TAP_MOUSE_MOVED: u32 = 1;
@@ -277,89 +277,11 @@ fn send_clipboard_payload(
     }
 }
 
-#[derive(Default)]
-struct ClipboardSyncState {
-    last_observed: Option<Vec<u8>>,
-    suppress_next_kind: Option<ClipboardKind>,
-    suppress_until: Option<Instant>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ClipboardKind {
-    Text,
-    Bitmap,
-    Files,
-}
-
-impl ClipboardSyncState {
-    fn accept_local_change(&mut self, payload: &ClipboardPayload, encoded: Vec<u8>) -> bool {
-        if self.last_observed.as_ref() == Some(&encoded) {
-            return false;
-        }
-
-        let kind = ClipboardKind::from_payload(payload);
-        if self.should_suppress(kind) {
-            eprintln!("suppressed remote clipboard echo");
-            self.last_observed = Some(encoded);
-            return false;
-        }
-
-        self.clear_suppression();
-        self.last_observed = Some(encoded);
-        true
-    }
-
-    fn note_remote_write(&mut self, payload: &ClipboardPayload) {
-        self.last_observed = Some(protocol::encode_clipboard(payload));
-        self.suppress_next_kind = Some(ClipboardKind::from_payload(payload));
-        self.suppress_until = Some(Instant::now() + REMOTE_CLIPBOARD_SUPPRESS_WINDOW);
-    }
-
-    fn should_suppress(&mut self, kind: ClipboardKind) -> bool {
-        if self.suppress_next_kind != Some(kind) {
-            return false;
-        }
-        if self
-            .suppress_until
-            .map(|until| Instant::now() <= until)
-            .unwrap_or(false)
-        {
-            self.clear_suppression();
-            return true;
-        }
-        self.clear_suppression();
-        false
-    }
-
-    fn clear_suppression(&mut self) {
-        self.suppress_next_kind = None;
-        self.suppress_until = None;
-    }
-}
-
-impl ClipboardKind {
-    fn from_payload(payload: &ClipboardPayload) -> Self {
-        match payload {
-            ClipboardPayload::Text(_) => Self::Text,
-            ClipboardPayload::Bitmap(_) => Self::Bitmap,
-            ClipboardPayload::Files(_) => Self::Files,
-        }
-    }
-}
-
 fn note_remote_clipboard(
     clipboard_state: &Arc<Mutex<ClipboardSyncState>>,
     payload: &ClipboardPayload,
 ) {
     clipboard_state.lock().unwrap().note_remote_write(payload);
-}
-
-fn clipboard_summary(payload: &ClipboardPayload) -> String {
-    match payload {
-        ClipboardPayload::Text(text) => format!("text ({} chars)", text.chars().count()),
-        ClipboardPayload::Bitmap(bitmap) => format!("image ({} bytes)", bitmap.len()),
-        ClipboardPayload::Files(files) => format!("files ({} item(s))", files.len()),
-    }
 }
 
 #[derive(Clone)]

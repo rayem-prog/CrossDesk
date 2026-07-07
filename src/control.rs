@@ -268,9 +268,11 @@ mod tests {
 
     #[test]
     fn server_launch_keeps_modifier_mapping_out_of_the_ui() {
-        let mut config = AppConfig::default();
-        config.role = Role::Server;
-        config.edge = Edge::Left;
+        let config = AppConfig {
+            role: Role::Server,
+            edge: Edge::Left,
+            ..AppConfig::default()
+        };
         let launch = ServiceLaunch::from_config(&config);
 
         assert_eq!(

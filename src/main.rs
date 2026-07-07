@@ -2,6 +2,7 @@
 
 mod client;
 mod clipboard;
+mod clipboard_sync;
 mod config;
 mod control;
 mod file_transfer;
@@ -27,19 +28,19 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    let args = env::args().skip(1).collect::<Vec<_>>();
-    if args
+    let cli_args = env::args().skip(1).collect::<Vec<_>>();
+    let help_requested = cli_args
         .iter()
-        .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
-    {
+        .any(|arg| matches!(arg.as_str(), "-h" | "--help"));
+    if help_requested {
         print_usage();
         return ExitCode::SUCCESS;
     }
 
-    let command = match parse_args(&args) {
+    let command = match parse_args(&cli_args) {
         Ok(command) => command,
-        Err(e) => {
-            eprintln!("{e}");
+        Err(error) => {
+            eprintln!("{error}");
             print_usage();
             return ExitCode::FAILURE;
         }
@@ -54,8 +55,8 @@ fn main() -> ExitCode {
         Command::Server { bind, edge } => server::run(server::ServerConfig { bind, edge }),
         Command::Client { server } => client::run(&server),
     };
-    if let Err(e) = result {
-        eprintln!("error: {e}");
+    if let Err(error) = result {
+        eprintln!("error: {error}");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
@@ -65,15 +66,16 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
     match args.first().map(String::as_str) {
         None | Some("gui") => Ok(Command::Gui),
         Some("server") => {
-            let bind = value_after(args, "--bind").unwrap_or_else(|| "0.0.0.0:24920".to_string());
-            let edge = value_after(args, "--edge")
+            let bind =
+                option_value_after(args, "--bind").unwrap_or_else(|| "0.0.0.0:24920".to_string());
+            let edge = option_value_after(args, "--edge")
                 .map(|value| server::Edge::parse(&value))
                 .transpose()?
                 .unwrap_or(server::Edge::Right);
             Ok(Command::Server { bind, edge })
         }
         Some("client") => {
-            let server = value_after(args, "--server")
+            let server = option_value_after(args, "--server")
                 .ok_or_else(|| "client mode requires --server HOST:PORT".to_string())?;
             Ok(Command::Client { server })
         }
@@ -81,7 +83,7 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
     }
 }
 
-fn value_after(args: &[String], key: &str) -> Option<String> {
+fn option_value_after(args: &[String], key: &str) -> Option<String> {
     args.windows(2)
         .find(|pair| pair[0] == key)
         .map(|pair| pair[1].clone())

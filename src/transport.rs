@@ -17,7 +17,7 @@ struct WriterInner {
 #[derive(Default)]
 struct WriteGate {
     active: bool,
-    waiting_input: usize,
+    waiting_input_frames: usize,
 }
 
 impl SharedWriter {
@@ -47,13 +47,15 @@ impl WriterInner {
     fn acquire(&self, input_priority: bool) -> WritePermit<'_> {
         let mut gate = self.gate.lock().unwrap();
         if input_priority {
-            gate.waiting_input += 1;
+            gate.waiting_input_frames += 1;
         }
-        while gate.active || (!input_priority && gate.waiting_input != 0) {
+        // Clipboard and file frames can be large, so input frames get a small
+        // priority lane to keep mouse/keyboard latency predictable.
+        while gate.active || (!input_priority && gate.waiting_input_frames != 0) {
             gate = self.ready.wait(gate).unwrap();
         }
         if input_priority {
-            gate.waiting_input -= 1;
+            gate.waiting_input_frames -= 1;
         }
         gate.active = true;
         WritePermit { inner: self }

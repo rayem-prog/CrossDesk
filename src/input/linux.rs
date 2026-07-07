@@ -470,36 +470,61 @@ fn write_c_name(target: &mut [libc::c_char; UINPUT_MAX_NAME_SIZE], name: &str) {
     }
 }
 
+const MOUSE_EXTRA_BACK_BUTTON: u8 = 4;
+const MOUSE_EXTRA_FORWARD_BUTTON: u8 = 5;
+const MOUSE_EXTRA_SIDE_BUTTON: u8 = 6;
+const EXTENDED_SCANCODE_OFFSET: u16 = 256;
+const SCANCODE_KEYPAD_ENTER: u16 = 284;
+const SCANCODE_RIGHT_CTRL: u16 = 285;
+const SCANCODE_RIGHT_ALT: u16 = 312;
+const SCANCODE_HOME: u16 = 327;
+const SCANCODE_ARROW_UP: u16 = 328;
+const SCANCODE_PAGE_UP: u16 = 329;
+const SCANCODE_ARROW_LEFT: u16 = 331;
+const SCANCODE_ARROW_RIGHT: u16 = 333;
+const SCANCODE_END: u16 = 335;
+const SCANCODE_ARROW_DOWN: u16 = 336;
+const SCANCODE_PAGE_DOWN: u16 = 337;
+const SCANCODE_INSERT: u16 = 338;
+const SCANCODE_DELETE: u16 = 339;
+const SCANCODE_LEFT_META: u16 = 347;
+
 fn mouse_button_code(button: MouseButton) -> u16 {
     match button {
         MouseButton::Left => BTN_LEFT,
         MouseButton::Middle => BTN_MIDDLE,
         MouseButton::Right => BTN_RIGHT,
-        MouseButton::Extra(4) => BTN_BACK,
-        MouseButton::Extra(5) => BTN_FORWARD,
-        MouseButton::Extra(6) => BTN_SIDE,
+        MouseButton::Extra(MOUSE_EXTRA_BACK_BUTTON) => BTN_BACK,
+        MouseButton::Extra(MOUSE_EXTRA_FORWARD_BUTTON) => BTN_FORWARD,
+        MouseButton::Extra(MOUSE_EXTRA_SIDE_BUTTON) => BTN_SIDE,
         MouseButton::Extra(_) => BTN_EXTRA,
     }
 }
 
 fn scancode_to_linux_key(scancode: u16) -> Option<u16> {
+    // Most Linux evdev key codes align with the low PC scancode range. Extended
+    // keys arrive with a 256 offset and are normalized back into that range.
     Some(match scancode {
-        284 => KEY_KPENTER,
-        285 => KEY_RIGHTCTRL,
-        312 => KEY_RIGHTALT,
-        327 => KEY_HOME,
-        328 => KEY_UP,
-        329 => KEY_PAGEUP,
-        331 => KEY_LEFT,
-        333 => KEY_RIGHT,
-        335 => KEY_END,
-        336 => KEY_DOWN,
-        337 => KEY_PAGEDOWN,
-        338 => KEY_INSERT,
-        339 => KEY_DELETE,
-        347 => KEY_LEFTMETA,
+        SCANCODE_KEYPAD_ENTER => KEY_KPENTER,
+        SCANCODE_RIGHT_CTRL => KEY_RIGHTCTRL,
+        SCANCODE_RIGHT_ALT => KEY_RIGHTALT,
+        SCANCODE_HOME => KEY_HOME,
+        SCANCODE_ARROW_UP => KEY_UP,
+        SCANCODE_PAGE_UP => KEY_PAGEUP,
+        SCANCODE_ARROW_LEFT => KEY_LEFT,
+        SCANCODE_ARROW_RIGHT => KEY_RIGHT,
+        SCANCODE_END => KEY_END,
+        SCANCODE_ARROW_DOWN => KEY_DOWN,
+        SCANCODE_PAGE_DOWN => KEY_PAGEDOWN,
+        SCANCODE_INSERT => KEY_INSERT,
+        SCANCODE_DELETE => KEY_DELETE,
+        SCANCODE_LEFT_META => KEY_LEFTMETA,
         code @ KEY_ESC..=KEY_MAX_COMMON => code,
-        code if code >= 256 && code - 256 <= KEY_MAX_COMMON => code - 256,
+        code if code >= EXTENDED_SCANCODE_OFFSET
+            && code - EXTENDED_SCANCODE_OFFSET <= KEY_MAX_COMMON =>
+        {
+            code - EXTENDED_SCANCODE_OFFSET
+        }
         _ => return None,
     })
 }

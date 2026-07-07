@@ -7,34 +7,90 @@ pub const VERSION: u16 = 3;
 pub const CHUNK_SIZE: usize = 16 * 1024;
 pub const MAX_FRAME_PAYLOAD_SIZE: usize = 64 * 1024 * 1024;
 
+// Wire-format tags. Keeping them named makes protocol changes auditable and
+// avoids scattering magic numbers through the encoders and decoders.
+const FRAME_HELLO: u8 = 1;
+const FRAME_INPUT: u8 = 2;
+const FRAME_CLIPBOARD: u8 = 3;
+const FRAME_FILE_START: u8 = 4;
+const FRAME_FILE_CHUNK: u8 = 5;
+const FRAME_FILE_END: u8 = 6;
+const FRAME_DRAG_START: u8 = 7;
+const FRAME_DRAG_UPDATE: u8 = 8;
+const FRAME_DRAG_END: u8 = 9;
+const FRAME_ERROR: u8 = 10;
+
+const INPUT_KEY: u8 = 1;
+const INPUT_MOUSE_ENTER: u8 = 2;
+const INPUT_MOUSE_BUTTON: u8 = 3;
+const INPUT_MOUSE_WHEEL: u8 = 4;
+const INPUT_MOUSE_DELTA: u8 = 5;
+const INPUT_MOUSE_LEAVE: u8 = 6;
+
+const KEY_DOWN: u8 = 1;
+const KEY_UP: u8 = 2;
+const KEY_REPEAT: u8 = 3;
+
+const MOUSE_LEFT: u8 = 1;
+const MOUSE_MIDDLE: u8 = 2;
+const MOUSE_RIGHT: u8 = 3;
+
+const CLIPBOARD_TEXT: u8 = 1;
+const CLIPBOARD_BITMAP: u8 = 2;
+const CLIPBOARD_FILES: u8 = 3;
+
+const KEY_EVENT_LEN: usize = 4;
+const MOUSE_BUTTON_EVENT_LEN: usize = 3;
+const MOUSE_WHEEL_EVENT_LEN: usize = 5;
+const POINTER_COORD_EVENT_LEN: usize = 9;
+const MOUSE_LEAVE_EVENT_LEN: usize = 1;
+const INPUT_KIND_OFFSET: usize = 0;
+const KEY_SCANCODE_OFFSET: usize = 1;
+const KEY_STATE_OFFSET: usize = 3;
+const POINTER_X_OFFSET: usize = 1;
+const POINTER_Y_OFFSET: usize = 5;
+const MOUSE_BUTTON_OFFSET: usize = 1;
+const MOUSE_BUTTON_STATE_OFFSET: usize = 2;
+const WHEEL_HORIZONTAL_OFFSET: usize = 1;
+const WHEEL_VERTICAL_OFFSET: usize = 3;
+const HELLO_VERSION_OFFSET: usize = 0;
+const HELLO_PLATFORM_OFFSET: usize = 2;
+const HELLO_WITH_PLATFORM_SCREEN_WIDTH_OFFSET: usize = 3;
+const HELLO_WITH_PLATFORM_SCREEN_HEIGHT_OFFSET: usize = 7;
+const LEGACY_HELLO_SCREEN_WIDTH_OFFSET: usize = 2;
+const LEGACY_HELLO_SCREEN_HEIGHT_OFFSET: usize = 6;
+const HELLO_MIN_VERSION_LEN: usize = 2;
+const HELLO_WITH_PLATFORM_AND_SCREEN_LEN: usize = 11;
+const LEGACY_HELLO_WITH_SCREEN_LEN: usize = 10;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FrameKind {
-    Hello = 1,
-    Input = 2,
-    Clipboard = 3,
-    FileStart = 4,
-    FileChunk = 5,
-    FileEnd = 6,
-    DragStart = 7,
-    DragUpdate = 8,
-    DragEnd = 9,
-    Error = 10,
+    Hello = FRAME_HELLO,
+    Input = FRAME_INPUT,
+    Clipboard = FRAME_CLIPBOARD,
+    FileStart = FRAME_FILE_START,
+    FileChunk = FRAME_FILE_CHUNK,
+    FileEnd = FRAME_FILE_END,
+    DragStart = FRAME_DRAG_START,
+    DragUpdate = FRAME_DRAG_UPDATE,
+    DragEnd = FRAME_DRAG_END,
+    Error = FRAME_ERROR,
 }
 
 impl FrameKind {
     fn from_byte(byte: u8) -> std::io::Result<Self> {
         match byte {
-            1 => Ok(Self::Hello),
-            2 => Ok(Self::Input),
-            3 => Ok(Self::Clipboard),
-            4 => Ok(Self::FileStart),
-            5 => Ok(Self::FileChunk),
-            6 => Ok(Self::FileEnd),
-            7 => Ok(Self::DragStart),
-            8 => Ok(Self::DragUpdate),
-            9 => Ok(Self::DragEnd),
-            10 => Ok(Self::Error),
+            FRAME_HELLO => Ok(Self::Hello),
+            FRAME_INPUT => Ok(Self::Input),
+            FRAME_CLIPBOARD => Ok(Self::Clipboard),
+            FRAME_FILE_START => Ok(Self::FileStart),
+            FRAME_FILE_CHUNK => Ok(Self::FileChunk),
+            FRAME_FILE_END => Ok(Self::FileEnd),
+            FRAME_DRAG_START => Ok(Self::DragStart),
+            FRAME_DRAG_UPDATE => Ok(Self::DragUpdate),
+            FRAME_DRAG_END => Ok(Self::DragEnd),
+            FRAME_ERROR => Ok(Self::Error),
             _ => Err(invalid("unknown frame kind")),
         }
     }
@@ -136,24 +192,31 @@ pub fn hello_payload_with_screen(width: u32, height: u32) -> Vec<u8> {
 }
 
 pub fn decode_hello(payload: &[u8]) -> std::io::Result<Hello> {
-    if payload.len() < 2 {
+    if payload.len() < HELLO_MIN_VERSION_LEN {
         return Err(invalid("short hello payload"));
     }
-    let version = u16::from_be_bytes([payload[0], payload[1]]);
+    let version = read_u16_at(payload, HELLO_VERSION_OFFSET)?;
     let platform = payload
-        .get(2)
+        .get(HELLO_PLATFORM_OFFSET)
         .copied()
         .map(Platform::from_byte)
         .unwrap_or(Platform::Unknown);
-    let (screen_width, screen_height) = if payload.len() >= 11 {
+    let (screen_width, screen_height) = if payload.len() >= HELLO_WITH_PLATFORM_AND_SCREEN_LEN {
         (
-            Some(u32::from_be_bytes(payload[3..7].try_into().unwrap())),
-            Some(u32::from_be_bytes(payload[7..11].try_into().unwrap())),
+            Some(read_u32_at(
+                payload,
+                HELLO_WITH_PLATFORM_SCREEN_WIDTH_OFFSET,
+            )?),
+            Some(read_u32_at(
+                payload,
+                HELLO_WITH_PLATFORM_SCREEN_HEIGHT_OFFSET,
+            )?),
         )
-    } else if payload.len() >= 10 {
+    } else if payload.len() >= LEGACY_HELLO_WITH_SCREEN_LEN {
+        // Compatibility with older peers that sent screen size before platform.
         (
-            Some(u32::from_be_bytes(payload[2..6].try_into().unwrap())),
-            Some(u32::from_be_bytes(payload[6..10].try_into().unwrap())),
+            Some(read_u32_at(payload, LEGACY_HELLO_SCREEN_WIDTH_OFFSET)?),
+            Some(read_u32_at(payload, LEGACY_HELLO_SCREEN_HEIGHT_OFFSET)?),
         )
     } else {
         (None, None)
@@ -181,26 +244,26 @@ pub fn encode_input(event: &InputEvent) -> Vec<u8> {
     let mut payload = Vec::new();
     match *event {
         InputEvent::Key { scancode, state } => {
-            payload.push(1);
+            payload.push(INPUT_KEY);
             payload.extend_from_slice(&scancode.to_be_bytes());
             payload.push(match state {
-                KeyState::Down => 1,
-                KeyState::Up => 2,
-                KeyState::Repeat => 3,
+                KeyState::Down => KEY_DOWN,
+                KeyState::Up => KEY_UP,
+                KeyState::Repeat => KEY_REPEAT,
             });
         }
         InputEvent::MouseEnter { x, y } => {
-            payload.push(2);
+            payload.push(INPUT_MOUSE_ENTER);
             payload.extend_from_slice(&x.to_be_bytes());
             payload.extend_from_slice(&y.to_be_bytes());
         }
-        InputEvent::MouseLeave => payload.push(6),
+        InputEvent::MouseLeave => payload.push(INPUT_MOUSE_LEAVE),
         InputEvent::MouseButton { button, down } => {
-            payload.push(3);
+            payload.push(INPUT_MOUSE_BUTTON);
             payload.push(match button {
-                MouseButton::Left => 1,
-                MouseButton::Middle => 2,
-                MouseButton::Right => 3,
+                MouseButton::Left => MOUSE_LEFT,
+                MouseButton::Middle => MOUSE_MIDDLE,
+                MouseButton::Right => MOUSE_RIGHT,
                 MouseButton::Extra(id) => id,
             });
             payload.push(u8::from(down));
@@ -209,12 +272,12 @@ pub fn encode_input(event: &InputEvent) -> Vec<u8> {
             horizontal,
             vertical,
         } => {
-            payload.push(4);
+            payload.push(INPUT_MOUSE_WHEEL);
             payload.extend_from_slice(&horizontal.to_be_bytes());
             payload.extend_from_slice(&vertical.to_be_bytes());
         }
         InputEvent::MouseDelta { dx, dy } => {
-            payload.push(5);
+            payload.push(INPUT_MOUSE_DELTA);
             payload.extend_from_slice(&dx.to_be_bytes());
             payload.extend_from_slice(&dy.to_be_bytes());
         }
@@ -224,64 +287,64 @@ pub fn encode_input(event: &InputEvent) -> Vec<u8> {
 
 pub fn decode_input(payload: &[u8]) -> std::io::Result<InputEvent> {
     let kind = *payload
-        .first()
+        .get(INPUT_KIND_OFFSET)
         .ok_or_else(|| invalid("short input event"))?;
     match kind {
-        1 => {
-            if payload.len() != 4 {
+        INPUT_KEY => {
+            if payload.len() != KEY_EVENT_LEN {
                 return Err(invalid("invalid key event"));
             }
-            let scancode = u16::from_be_bytes([payload[1], payload[2]]);
-            let state = match payload[3] {
-                1 => KeyState::Down,
-                2 => KeyState::Up,
-                3 => KeyState::Repeat,
+            let scancode = read_u16_at(payload, KEY_SCANCODE_OFFSET)?;
+            let state = match payload[KEY_STATE_OFFSET] {
+                KEY_DOWN => KeyState::Down,
+                KEY_UP => KeyState::Up,
+                KEY_REPEAT => KeyState::Repeat,
                 _ => return Err(invalid("invalid key state")),
             };
             Ok(InputEvent::Key { scancode, state })
         }
-        2 => {
-            if payload.len() != 9 {
+        INPUT_MOUSE_ENTER => {
+            if payload.len() != POINTER_COORD_EVENT_LEN {
                 return Err(invalid("invalid mouse enter event"));
             }
-            let x = i32::from_be_bytes(payload[1..5].try_into().unwrap());
-            let y = i32::from_be_bytes(payload[5..9].try_into().unwrap());
+            let x = read_i32_at(payload, POINTER_X_OFFSET)?;
+            let y = read_i32_at(payload, POINTER_Y_OFFSET)?;
             Ok(InputEvent::MouseEnter { x, y })
         }
-        3 => {
-            if payload.len() != 3 {
+        INPUT_MOUSE_BUTTON => {
+            if payload.len() != MOUSE_BUTTON_EVENT_LEN {
                 return Err(invalid("invalid mouse button event"));
             }
-            let button = match payload[1] {
-                1 => MouseButton::Left,
-                2 => MouseButton::Middle,
-                3 => MouseButton::Right,
+            let button = match payload[MOUSE_BUTTON_OFFSET] {
+                MOUSE_LEFT => MouseButton::Left,
+                MOUSE_MIDDLE => MouseButton::Middle,
+                MOUSE_RIGHT => MouseButton::Right,
                 id => MouseButton::Extra(id),
             };
             Ok(InputEvent::MouseButton {
                 button,
-                down: payload[2] != 0,
+                down: payload[MOUSE_BUTTON_STATE_OFFSET] != 0,
             })
         }
-        4 => {
-            if payload.len() != 5 {
+        INPUT_MOUSE_WHEEL => {
+            if payload.len() != MOUSE_WHEEL_EVENT_LEN {
                 return Err(invalid("invalid wheel event"));
             }
             Ok(InputEvent::MouseWheel {
-                horizontal: i16::from_be_bytes([payload[1], payload[2]]),
-                vertical: i16::from_be_bytes([payload[3], payload[4]]),
+                horizontal: read_i16_at(payload, WHEEL_HORIZONTAL_OFFSET)?,
+                vertical: read_i16_at(payload, WHEEL_VERTICAL_OFFSET)?,
             })
         }
-        5 => {
-            if payload.len() != 9 {
+        INPUT_MOUSE_DELTA => {
+            if payload.len() != POINTER_COORD_EVENT_LEN {
                 return Err(invalid("invalid mouse delta event"));
             }
-            let dx = i32::from_be_bytes(payload[1..5].try_into().unwrap());
-            let dy = i32::from_be_bytes(payload[5..9].try_into().unwrap());
+            let dx = read_i32_at(payload, POINTER_X_OFFSET)?;
+            let dy = read_i32_at(payload, POINTER_Y_OFFSET)?;
             Ok(InputEvent::MouseDelta { dx, dy })
         }
-        6 if payload.len() == 1 => Ok(InputEvent::MouseLeave),
-        6 => Err(invalid("invalid mouse leave event")),
+        INPUT_MOUSE_LEAVE if payload.len() == MOUSE_LEAVE_EVENT_LEN => Ok(InputEvent::MouseLeave),
+        INPUT_MOUSE_LEAVE => Err(invalid("invalid mouse leave event")),
         _ => Err(invalid("unknown input event kind")),
     }
 }
@@ -290,15 +353,15 @@ pub fn encode_clipboard(payload: &ClipboardPayload) -> Vec<u8> {
     let mut out = Vec::new();
     match payload {
         ClipboardPayload::Text(text) => {
-            out.push(1);
+            out.push(CLIPBOARD_TEXT);
             write_bytes(&mut out, text.as_bytes());
         }
         ClipboardPayload::Bitmap(bitmap) => {
-            out.push(2);
+            out.push(CLIPBOARD_BITMAP);
             write_bytes(&mut out, bitmap);
         }
         ClipboardPayload::Files(files) => {
-            out.push(3);
+            out.push(CLIPBOARD_FILES);
             out.extend_from_slice(&(files.len() as u32).to_be_bytes());
             for file in files {
                 write_bytes(&mut out, file.to_string_lossy().as_bytes());
@@ -314,14 +377,14 @@ pub fn decode_clipboard(payload: &[u8]) -> std::io::Result<ClipboardPayload> {
         .ok_or_else(|| invalid("short clipboard payload"))?;
     let mut offset = 1;
     match kind {
-        1 => Ok(ClipboardPayload::Text(
+        CLIPBOARD_TEXT => Ok(ClipboardPayload::Text(
             String::from_utf8(read_bytes(payload, &mut offset)?.to_vec())
                 .map_err(|e| invalid_owned(e.to_string()))?,
         )),
-        2 => Ok(ClipboardPayload::Bitmap(
+        CLIPBOARD_BITMAP => Ok(ClipboardPayload::Bitmap(
             read_bytes(payload, &mut offset)?.to_vec(),
         )),
-        3 => {
+        CLIPBOARD_FILES => {
             let count = read_u32(payload, &mut offset)?;
             let mut files = Vec::new();
             for _ in 0..count {
@@ -350,7 +413,7 @@ pub fn decode_file_start(payload: &[u8]) -> std::io::Result<(String, u64)> {
     if payload.len() < offset + 8 {
         return Err(invalid("short file start payload"));
     }
-    let len = u64::from_be_bytes(payload[offset..offset + 8].try_into().unwrap());
+    let len = read_u64_at(payload, offset)?;
     Ok((relative, len))
 }
 
@@ -370,12 +433,44 @@ fn read_bytes<'a>(payload: &'a [u8], offset: &mut usize) -> std::io::Result<&'a 
 }
 
 fn read_u32(payload: &[u8], offset: &mut usize) -> std::io::Result<u32> {
-    let end = *offset + 4;
+    let value = read_u32_at(payload, *offset)?;
+    *offset += 4;
+    Ok(value)
+}
+
+fn read_i16_at(payload: &[u8], start: usize) -> std::io::Result<i16> {
     let bytes = payload
-        .get(*offset..end)
+        .get(start..start + 2)
+        .ok_or_else(|| invalid("short i16"))?;
+    Ok(i16::from_be_bytes(bytes.try_into().unwrap()))
+}
+
+fn read_u16_at(payload: &[u8], start: usize) -> std::io::Result<u16> {
+    let bytes = payload
+        .get(start..start + 2)
+        .ok_or_else(|| invalid("short u16"))?;
+    Ok(u16::from_be_bytes(bytes.try_into().unwrap()))
+}
+
+fn read_i32_at(payload: &[u8], start: usize) -> std::io::Result<i32> {
+    let bytes = payload
+        .get(start..start + 4)
+        .ok_or_else(|| invalid("short i32"))?;
+    Ok(i32::from_be_bytes(bytes.try_into().unwrap()))
+}
+
+fn read_u32_at(payload: &[u8], start: usize) -> std::io::Result<u32> {
+    let bytes = payload
+        .get(start..start + 4)
         .ok_or_else(|| invalid("short u32"))?;
-    *offset = end;
     Ok(u32::from_be_bytes(bytes.try_into().unwrap()))
+}
+
+fn read_u64_at(payload: &[u8], start: usize) -> std::io::Result<u64> {
+    let bytes = payload
+        .get(start..start + 8)
+        .ok_or_else(|| invalid("short u64"))?;
+    Ok(u64::from_be_bytes(bytes.try_into().unwrap()))
 }
 
 fn invalid(message: &str) -> std::io::Error {

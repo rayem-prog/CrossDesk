@@ -1,10 +1,15 @@
+const PLATFORM_UNKNOWN: u8 = 0;
+const PLATFORM_WINDOWS: u8 = 1;
+const PLATFORM_MACOS: u8 = 2;
+const PLATFORM_LINUX: u8 = 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Platform {
-    Unknown = 0,
-    Windows = 1,
-    MacOS = 2,
-    Linux = 3,
+    Unknown = PLATFORM_UNKNOWN,
+    Windows = PLATFORM_WINDOWS,
+    MacOS = PLATFORM_MACOS,
+    Linux = PLATFORM_LINUX,
 }
 
 impl Platform {
@@ -29,9 +34,9 @@ impl Platform {
 
     pub fn from_byte(value: u8) -> Self {
         match value {
-            1 => Self::Windows,
-            2 => Self::MacOS,
-            3 => Self::Linux,
+            PLATFORM_WINDOWS => Self::Windows,
+            PLATFORM_MACOS => Self::MacOS,
+            PLATFORM_LINUX => Self::Linux,
             _ => Self::Unknown,
         }
     }

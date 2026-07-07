@@ -165,6 +165,8 @@ function App() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [saveNotice, setSaveNotice] = useState('');
+  // These refs prevent the 1.2s polling refresh from overwriting text the user
+  // is actively editing before it has been saved.
   const configDirtyRef = useRef(false);
   const configEditingRef = useRef(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -172,10 +174,10 @@ function App() {
   const [updateInfo, setUpdateInfo] = useState(null);
   const [updateBusy, setUpdateBusy] = useState(false);
 
-  async function command(name, args = {}, options = {}) {
+  async function invokeBackendCommand(commandName, args = {}, options = {}) {
     const { preserveLocalConfig = false } = options;
     setError('');
-    const payload = await invoke(name, args);
+    const payload = await invoke(commandName, args);
     setState(payload);
     if (payload.config && !(preserveLocalConfig && (configDirtyRef.current || configEditingRef.current))) {
       setConfig(payload.config);
@@ -185,7 +187,7 @@ function App() {
 
   async function refresh() {
     try {
-      await command('get_state', {}, { preserveLocalConfig: true });
+      await invokeBackendCommand('get_state', {}, { preserveLocalConfig: true });
     } catch (err) {
       setError(String(err));
     }
@@ -221,11 +223,11 @@ function App() {
     }
   }
 
-  async function action(name) {
+  async function runServiceCommand(commandName) {
     setBusy(true);
     setError('');
     try {
-      if (name === 'start_service' && config && (configDirtyRef.current || configEditingRef.current)) {
+      if (commandName === 'start_service' && config && (configDirtyRef.current || configEditingRef.current)) {
         try {
           await persistConfig(config);
         } catch (err) {
@@ -233,7 +235,7 @@ function App() {
           throw err;
         }
       }
-      await command(name, {}, { preserveLocalConfig: name === 'start_service' });
+      await invokeBackendCommand(commandName, {}, { preserveLocalConfig: commandName === 'start_service' });
     } catch (err) {
       setError(String(err));
     } finally {
@@ -393,10 +395,10 @@ function App() {
             <code>{commandPreview}</code>
           </div>
           <div className="button-row">
-            <button className="primary start-button" disabled={busy || running} onClick={() => action('start_service')}>
+            <button className="primary start-button" disabled={busy || running} onClick={() => runServiceCommand('start_service')}>
               <Play size={16} /> {t.start}
             </button>
-            <button className="danger stop-button" disabled={busy || !running} onClick={() => action('stop_service')}>
+            <button className="danger stop-button" disabled={busy || !running} onClick={() => runServiceCommand('stop_service')}>
               <CircleStop size={16} /> {t.stop}
             </button>
             <button className="secondary save-button" disabled={busy} onClick={() => save()}>
@@ -411,7 +413,7 @@ function App() {
 
 
         <Panel className="logs-panel" title={t.logs} icon={<TerminalSquare size={18} />} action={
-          <button className="ghost" onClick={() => action('clear_logs')}>{t.clear}</button>
+          <button className="ghost" onClick={() => runServiceCommand('clear_logs')}>{t.clear}</button>
         }>
           <div className="logs-box">
             {logs.length ? logs.map((line, index) => <div key={`${index}-${line}`}>{line}</div>) : <span className="muted">{t.noLogs}</span>}

@@ -7,6 +7,8 @@ use crate::protocol::{self, Frame, FrameKind};
 use crate::transport::SharedWriter;
 
 const MAX_BUNDLE_SIZE: u64 = 512 * 1024 * 1024;
+// FileStart carries a length for regular files. u64::MAX is reserved as a
+// sentinel because directories do not have byte chunks to transfer.
 const DIRECTORY_MARKER_LEN: u64 = u64::MAX;
 
 pub fn send_files(writer: &SharedWriter, files: &[PathBuf]) -> std::io::Result<()> {
@@ -35,11 +37,14 @@ pub fn send_files(writer: &SharedWriter, files: &[PathBuf]) -> std::io::Result<(
         let mut file = File::open(&entry.source)?;
         let mut buffer = vec![0u8; protocol::CHUNK_SIZE];
         loop {
-            let n = file.read(&mut buffer)?;
-            if n == 0 {
+            let bytes_read = file.read(&mut buffer)?;
+            if bytes_read == 0 {
                 break;
             }
-            writer.write(Frame::new(FrameKind::FileChunk, buffer[..n].to_vec()))?;
+            writer.write(Frame::new(
+                FrameKind::FileChunk,
+                buffer[..bytes_read].to_vec(),
+            ))?;
         }
         writer.write(Frame::new(FrameKind::FileEnd, Vec::new()))?;
     }
@@ -86,10 +91,10 @@ impl IncomingBundle {
     }
 
     pub fn write_chunk(&mut self, chunk: &[u8]) -> std::io::Result<()> {
-        if let Some(file) = self.current.as_mut() {
-            if file.write_chunk(chunk)? {
-                self.current = None;
-            }
+        if let Some(file) = self.current.as_mut()
+            && file.write_chunk(chunk)?
+        {
+            self.current = None;
         }
         Ok(())
     }
@@ -152,12 +157,16 @@ fn collect_entries(files: &[PathBuf]) -> std::io::Result<Vec<Entry>> {
         let Some(name) = file.file_name() else {
             continue;
         };
-        collect(file, Path::new(name), &mut entries)?;
+        collect_entry_tree(file, Path::new(name), &mut entries)?;
     }
     Ok(entries)
 }
 
-fn collect(path: &Path, relative: &Path, entries: &mut Vec<Entry>) -> std::io::Result<()> {
+fn collect_entry_tree(
+    path: &Path,
+    relative: &Path,
+    entries: &mut Vec<Entry>,
+) -> std::io::Result<()> {
     let metadata = fs::metadata(path)?;
     if metadata.is_dir() {
         entries.push(Entry {
@@ -168,7 +177,7 @@ fn collect(path: &Path, relative: &Path, entries: &mut Vec<Entry>) -> std::io::R
         });
         for child in fs::read_dir(path)? {
             let child = child?;
-            collect(&child.path(), &relative.join(child.file_name()), entries)?;
+            collect_entry_tree(&child.path(), &relative.join(child.file_name()), entries)?;
         }
     } else if metadata.is_file() {
         entries.push(Entry {
@@ -182,12 +191,13 @@ fn collect(path: &Path, relative: &Path, entries: &mut Vec<Entry>) -> std::io::R
 }
 
 fn safe_relative_path(value: &str) -> std::io::Result<PathBuf> {
+    // Never trust paths received over the socket: accept only plain relative
+    // components so a peer cannot escape the receive root with `..` or `/`.
     let path = Path::new(value);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|c| !matches!(c, Component::Normal(_)))
-    {
+    let contains_only_normal_components = path
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)));
+    if path.is_absolute() || !contains_only_normal_components {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "unsafe relative path",

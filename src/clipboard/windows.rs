@@ -35,30 +35,30 @@ impl Clipboard {
 impl ClipboardApi for Clipboard {
     fn read(&mut self) -> std::io::Result<Option<ClipboardPayload>> {
         let _guard = ClipboardGuard::open()?;
-        if unsafe { IsClipboardFormatAvailable(CF_HDROP as u32) } != 0 {
-            if let Some(files) = read_files()? {
-                return Ok(Some(ClipboardPayload::Files(files)));
-            }
+        if unsafe { IsClipboardFormatAvailable(CF_HDROP as u32) } != 0
+            && let Some(files) = read_files()?
+        {
+            return Ok(Some(ClipboardPayload::Files(files)));
         }
-        if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT as u32) } != 0 {
-            if let Some(text) = read_text()? {
-                return Ok(Some(ClipboardPayload::Text(text)));
-            }
+        if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT as u32) } != 0
+            && let Some(text) = read_text()?
+        {
+            return Ok(Some(ClipboardPayload::Text(text)));
         }
-        if unsafe { IsClipboardFormatAvailable(CF_TEXT as u32) } != 0 {
-            if let Some(text) = read_narrow_text(CF_TEXT as u32)? {
-                return Ok(Some(ClipboardPayload::Text(text)));
-            }
+        if unsafe { IsClipboardFormatAvailable(CF_TEXT as u32) } != 0
+            && let Some(text) = read_narrow_text(CF_TEXT as u32)?
+        {
+            return Ok(Some(ClipboardPayload::Text(text)));
         }
-        if unsafe { IsClipboardFormatAvailable(CF_OEMTEXT as u32) } != 0 {
-            if let Some(text) = read_narrow_text(CF_OEMTEXT as u32)? {
-                return Ok(Some(ClipboardPayload::Text(text)));
-            }
+        if unsafe { IsClipboardFormatAvailable(CF_OEMTEXT as u32) } != 0
+            && let Some(text) = read_narrow_text(CF_OEMTEXT as u32)?
+        {
+            return Ok(Some(ClipboardPayload::Text(text)));
         }
-        if unsafe { IsClipboardFormatAvailable(CF_DIB as u32) } != 0 {
-            if let Some(bitmap) = read_bitmap()? {
-                return Ok(Some(ClipboardPayload::Bitmap(bitmap)));
-            }
+        if unsafe { IsClipboardFormatAvailable(CF_DIB as u32) } != 0
+            && let Some(bitmap) = read_bitmap()?
+        {
+            return Ok(Some(ClipboardPayload::Bitmap(bitmap)));
         }
         Ok(None)
     }
@@ -169,10 +169,10 @@ fn read_bitmap() -> std::io::Result<Option<Vec<u8>>> {
 fn write_bitmap(bitmap: &[u8]) -> std::io::Result<()> {
     let dib = image_to_dib(bitmap).or_else(|_| bmp_to_dib(bitmap))?;
     set_clipboard_bytes(CF_DIB as u32, &dib)?;
-    if let Ok(png) = image_to_png(bitmap) {
-        if let Some(format) = registered_clipboard_format("PNG") {
-            let _ = set_clipboard_bytes(format, &png);
-        }
+    if let Ok(png) = image_to_png(bitmap)
+        && let Some(format) = registered_clipboard_format("PNG")
+    {
+        let _ = set_clipboard_bytes(format, &png);
     }
     Ok(())
 }
