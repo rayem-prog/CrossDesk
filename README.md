@@ -56,7 +56,7 @@ cargo build --release --locked --no-default-features
 
 本工作区另有 `scripts/dev.ps1`，用于使用旁边的便携 Windows 编译工具链；该工具链不包含在交付包中。Mac 构建不依赖此脚本。
 
-本地 Apple Silicon 检查使用 `CROSSDESK_CHECK_ONLY=1` 跳过原生 C 编译，仅证明 Mac Rust 代码通过类型检查。实际 Mac 构建应不设置此变量，以编译原生 C 并链接 Apple 框架。CI 工作流包含 Windows 和 Mac 原生构建，尚未上传或执行远端 CI。
+本地 Apple Silicon 检查使用 `CROSSDESK_CHECK_ONLY=1` 跳过原生 C 编译，仅证明 Mac Rust 代码通过类型检查。实际 Mac 构建应不设置此变量，以编译原生 C 并链接 Apple 框架。CI 在源码变更推送后执行 Windows 和 Mac 原生构建，结果见 [GitHub Actions](https://github.com/rayem-prog/CrossDesk/actions)。
 
 当前本地验证记录见 `VALIDATION.md`。尚未在用户的 M1 Pro / macOS 27.0.1 上完成原生构建和双机操控验证。
 

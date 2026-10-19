@@ -23,5 +23,7 @@ Pending real-device checks:
 - Actual pointer, button, scroll, text/IME and window dragging on M1 Pro/macOS 27.0.1.
 - Physical unplug, Wi-Fi loss, sleep/wake, and reconnect behavior across both machines.
 
-There is no claim of completed Mac execution or dual-machine validation. Remote CI
-has not been run. Cross-machine file dragging is outside this input prototype.
+There is no claim of completed execution on the user's Mac or dual-machine validation.
+Remote Windows and macOS builds run through [GitHub Actions](https://github.com/rayem-prog/CrossDesk/actions);
+consult the individual run for its status. The checks above describe local validation.
+Cross-machine file dragging is outside this input prototype.
