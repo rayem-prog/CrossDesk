@@ -1,0 +1,32 @@
+name: CrossDesk input prototype
+on:
+  workflow_dispatch:
+  push:
+    paths: ['src/**', 'Cargo.*', 'build.rs', '.github/workflows/crossdesk-input.yml']
+  pull_request:
+    paths: ['src/**', 'Cargo.*', 'build.rs', '.github/workflows/crossdesk-input.yml']
+jobs:
+  native:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+          targets: ${{ matrix.target }}
+      - run: cargo fmt --check
+      - run: cargo test --locked --no-default-features
+      - run: cargo build --release --locked --no-default-features --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CrossDesk-${{ matrix.os }}
+          path: |
+            target/${{ matrix.target }}/release/crossdesk.exe
+            target/${{ matrix.target }}/release/crossdesk

@@ -1,5 +1,21 @@
 use std::io::BufRead;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+
+static REQUESTED: AtomicBool = AtomicBool::new(false);
+
+pub fn requested() -> bool {
+    REQUESTED.load(Ordering::Acquire)
+}
+
+pub fn install_signal_handler() -> std::io::Result<()> {
+    ctrlc::set_handler(|| {
+        REQUESTED.store(true, Ordering::Release);
+        #[cfg(windows)]
+        crate::server::request_stop();
+    })
+    .map_err(std::io::Error::other)
+}
 
 const GUI_CHILD_ENV: &str = "DESKBRIDGE_GUI_CHILD";
 

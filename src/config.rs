@@ -73,7 +73,7 @@ impl Default for AppConfig {
             language: default_language(),
             bind: "0.0.0.0:24920".to_string(),
             server: "192.168.1.10:24920".to_string(),
-            edge: Edge::Right,
+            edge: Edge::Both,
             scroll_scale: 1.35,
             scroll_response: 0.38,
             scroll_max_step: 120.0,
@@ -90,7 +90,7 @@ impl Default for AppConfig {
             mac_arrow_right_mapping: KeyTarget::ArrowRight,
             mac_arrow_up_mapping: KeyTarget::ArrowUp,
             mac_arrow_down_mapping: KeyTarget::ArrowDown,
-            auto_update_check: true,
+            auto_update_check: false,
         }
     }
 }
@@ -218,6 +218,7 @@ impl AppConfig {
                 match self.edge {
                     Edge::Left => "left",
                     Edge::Right => "right",
+                    Edge::Both => "both",
                 },
                 self.scroll_scale,
                 self.scroll_response,

@@ -247,6 +247,7 @@ fn edge_name(edge: Edge) -> &'static str {
     match edge {
         Edge::Left => "left",
         Edge::Right => "right",
+        Edge::Both => "both",
     }
 }
 

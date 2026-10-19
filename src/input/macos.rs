@@ -291,10 +291,13 @@ impl InputSink {
             );
             request_accessibility_permission();
         }
-        let cursor_hidden = unsafe { deskbridge_macos_hide_cursor() } == 0;
-        if !cursor_hidden {
-            eprintln!("warning: failed to hide inactive macOS client cursor");
+        if !accessibility_trusted() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Enable CrossDesk (or its launching Terminal) in System Settings > Privacy & Security > Accessibility, then relaunch.",
+            ));
         }
+        let cursor_hidden = false;
         Ok(Self {
             native,
             pressed_keys: HashSet::new(),
@@ -566,13 +569,6 @@ impl InputSink {
     fn mouse_leave(&mut self) -> std::io::Result<()> {
         self.release_remote_input();
         self.remote_active = false;
-        if !self.cursor_hidden {
-            check_native_status(
-                unsafe { deskbridge_macos_hide_cursor() },
-                "failed to hide inactive macOS client cursor",
-            )?;
-            self.cursor_hidden = true;
-        }
         Ok(())
     }
 

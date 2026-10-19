@@ -13,8 +13,7 @@ pub use linux::InputSink;
 pub use linux::screen_size;
 #[cfg(target_os = "macos")]
 pub use macos::InputSink;
-#[cfg(target_os = "macos")]
-pub use macos::screen_size;
+
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub use unsupported::InputSink;
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]

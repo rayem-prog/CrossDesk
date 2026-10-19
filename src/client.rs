@@ -1,7 +1,8 @@
-use std::net::{Shutdown, TcpStream};
+use crate::secure::SecureStream;
+use std::net::Shutdown;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,8 +17,27 @@ const REMOTE_CLIPBOARD_SUPPRESS_WINDOW: Duration = Duration::from_millis(1200);
 const DEFAULT_INPUT_FLUSH_MS: u64 = 4;
 
 pub fn run(server: &str) -> std::io::Result<()> {
+    let key = crate::secure::load_key()?;
+    while !crate::shutdown::requested() {
+        match run_session(server, &key) {
+            Ok(()) => return Ok(()),
+            Err(error) if crate::shutdown::requested() => {
+                let _ = error;
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Err(error);
+            }
+            Err(error) => eprintln!("Disconnected: {error}. Retrying in one second; Ctrl+C exits."),
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    Ok(())
+}
+
+fn run_session(server: &str, key: &[u8; 32]) -> std::io::Result<()> {
     eprintln!("connecting to {server}");
-    let mut stream = TcpStream::connect(server)?;
+    let mut stream = SecureStream::connect(server, key)?;
     stream.set_nodelay(true)?;
     let writer = SharedWriter::new(stream.try_clone()?);
     let stop_requested = Arc::new(AtomicBool::new(false));
@@ -64,12 +84,26 @@ pub fn run(server: &str) -> std::io::Result<()> {
     let mut input_log = InputLog::new();
 
     loop {
+        if crate::shutdown::requested() {
+            return Ok(());
+        }
         let frame = match protocol::read_frame(&mut stream) {
             Ok(frame) => frame,
             Err(_) if stop_requested.load(Ordering::Acquire) => return Ok(()),
             Err(e) => return Err(e),
         };
+        if !crate::transport::clipboard_enabled()
+            && !matches!(frame.kind, FrameKind::Ping | FrameKind::Input)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unexpected server frame in input-only mode",
+            ));
+        }
         match frame.kind {
+            FrameKind::Ping => {
+                writer.write(protocol::Frame::new(FrameKind::Pong, frame.payload))?;
+            }
             FrameKind::Input => {
                 let event = protocol::decode_input(&frame.payload)?;
                 input_log.observe(&event);
@@ -106,168 +140,53 @@ pub fn run(server: &str) -> std::io::Result<()> {
     }
 }
 
+// The server already coalesces motion. Keeping every event in one ordered
+// queue prevents a later motion from jumping ahead of a mouse-down/up.
 struct InputApplier {
-    sender: Option<Sender<InputEvent>>,
-    pending_motion: Arc<Mutex<PendingInput>>,
+    sender: Option<mpsc::SyncSender<InputEvent>>,
     worker: Option<thread::JoinHandle<()>>,
 }
-
-#[derive(Default)]
-struct PendingInput {
-    delta: (i32, i32),
-    wheel: (i32, i32),
-}
-
-impl PendingInput {
-    fn queue(&mut self, event: InputEvent) {
-        match event {
-            InputEvent::MouseDelta { dx, dy } => {
-                self.delta.0 = self.delta.0.saturating_add(dx);
-                self.delta.1 = self.delta.1.saturating_add(dy);
-            }
-            InputEvent::MouseWheel {
-                horizontal,
-                vertical,
-            } => {
-                self.wheel.0 = self.wheel.0.saturating_add(horizontal as i32);
-                self.wheel.1 = self.wheel.1.saturating_add(vertical as i32);
-            }
-            _ => {}
-        }
-    }
-
-    fn take_events(&mut self) -> Vec<InputEvent> {
-        let mut events = Vec::with_capacity(2);
-        if self.delta.0 != 0 || self.delta.1 != 0 {
-            events.push(InputEvent::MouseDelta {
-                dx: self.delta.0,
-                dy: self.delta.1,
-            });
-            self.delta = (0, 0);
-        }
-        if self.wheel.0 != 0 || self.wheel.1 != 0 {
-            events.push(InputEvent::MouseWheel {
-                horizontal: clamp_i16(self.wheel.0),
-                vertical: clamp_i16(self.wheel.1),
-            });
-            self.wheel = (0, 0);
-        }
-        events
-    }
-}
-
 impl InputApplier {
     fn spawn(profile: ConnectionProfile) -> std::io::Result<(Self, (u32, u32))> {
-        let (sender, receiver) = mpsc::channel();
-        let pending_motion = Arc::new(Mutex::new(PendingInput::default()));
-        let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
-        let worker = thread::spawn({
-            let pending_motion = Arc::clone(&pending_motion);
-            move || match InputSink::new(profile) {
-                Ok(mut input) => {
-                    let screen_size = input.screen_size();
-                    let _ = ready_sender.send(Ok(screen_size));
-                    input_worker_loop(&mut input, receiver, pending_motion);
+        let (sender, receiver) = mpsc::sync_channel(256);
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || match InputSink::new(profile) {
+            Ok(mut input) => {
+                let _ = ready_tx.send(Ok(input.screen_size()));
+                for event in receiver {
+                    if let Err(error) = input.apply(event) {
+                        eprintln!("input apply failed: {error}");
+                    }
                 }
-                Err(e) => {
-                    let _ = ready_sender.send(Err(e.to_string()));
-                }
+                // Dropping InputSink releases all remotely pressed keys/buttons.
+            }
+            Err(error) => {
+                let _ = ready_tx.send(Err(error));
             }
         });
-        let screen_size = match ready_receiver.recv() {
-            Ok(Ok(screen_size)) => screen_size,
-            Ok(Err(e)) => return Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
-            Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)),
-        };
+        let size = ready_rx.recv().map_err(std::io::Error::other)??;
         Ok((
             Self {
                 sender: Some(sender),
-                pending_motion,
                 worker: Some(worker),
             },
-            screen_size,
+            size,
         ))
     }
-
     fn send(&self, event: InputEvent) {
-        match event {
-            event @ (InputEvent::MouseDelta { .. } | InputEvent::MouseWheel { .. }) => {
-                self.pending_motion.lock().unwrap().queue(event);
-            }
-            event => {
-                let Some(sender) = self.sender.as_ref() else {
-                    return;
-                };
-                if let Err(e) = sender.send(event) {
-                    eprintln!("input apply queue closed: {e}");
-                }
+        if let Some(sender) = &self.sender {
+            if let Err(error) = sender.send(event) {
+                eprintln!("input queue closed: {error}");
             }
         }
     }
 }
-
 impl Drop for InputApplier {
     fn drop(&mut self) {
         self.sender.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
-    }
-}
-
-fn input_worker_loop(
-    input: &mut InputSink,
-    receiver: Receiver<InputEvent>,
-    pending_motion: Arc<Mutex<PendingInput>>,
-) {
-    loop {
-        match receiver.recv_timeout(input_flush_interval()) {
-            Ok(event) => apply_ordered_input_event(input, event, &pending_motion),
-            Err(RecvTimeoutError::Timeout) => flush_pending_input(input, &pending_motion),
-            Err(RecvTimeoutError::Disconnected) => {
-                flush_pending_input(input, &pending_motion);
-                break;
-            }
-        }
-    }
-}
-
-fn apply_ordered_input_event(
-    input: &mut InputSink,
-    event: InputEvent,
-    pending_motion: &Arc<Mutex<PendingInput>>,
-) {
-    if matches!(event, InputEvent::MouseEnter { .. }) {
-        apply_input_event(input, event);
-        flush_pending_input(input, pending_motion);
-    } else {
-        flush_pending_input(input, pending_motion);
-        apply_input_event(input, event);
-    }
-}
-
-fn input_flush_interval() -> Duration {
-    static INTERVAL: OnceLock<Duration> = OnceLock::new();
-    *INTERVAL.get_or_init(|| {
-        let ms = std::env::var("DESKBRIDGE_INPUT_FLUSH_MS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(DEFAULT_INPUT_FLUSH_MS)
-            .clamp(1, 16);
-        Duration::from_millis(ms)
-    })
-}
-
-fn flush_pending_input(input: &mut InputSink, pending_motion: &Arc<Mutex<PendingInput>>) {
-    let events = pending_motion.lock().unwrap().take_events();
-    for event in events {
-        apply_input_event(input, event);
-    }
-}
-
-fn apply_input_event(input: &mut InputSink, event: InputEvent) {
-    if let Err(e) = input.apply(event) {
-        eprintln!("input apply failed: {e}");
     }
 }
 
@@ -312,6 +231,9 @@ impl InputLog {
 }
 
 fn spawn_clipboard_watcher(writer: SharedWriter, clipboard_state: Arc<Mutex<ClipboardSyncState>>) {
+    if !crate::transport::clipboard_enabled() {
+        return;
+    }
     thread::spawn(move || {
         let mut clipboard = match Clipboard::new() {
             Ok(clipboard) => clipboard,

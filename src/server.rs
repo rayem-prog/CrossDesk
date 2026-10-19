@@ -1,27 +1,22 @@
-#[cfg(target_os = "linux")]
-mod linux;
-#[cfg(target_os = "macos")]
-mod macos;
-#[cfg(target_os = "macos")]
-mod macos_capture;
-#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
-mod unsupported;
 #[cfg(windows)]
 mod windows;
-
-#[cfg(target_os = "linux")]
-pub use linux::run;
-#[cfg(target_os = "macos")]
-pub use macos::run;
-#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
-pub use unsupported::run;
+#[cfg(windows)]
+pub use windows::request_stop;
 #[cfg(windows)]
 pub use windows::run;
+
+#[cfg(not(windows))]
+pub fn run(_config: ServerConfig) -> std::io::Result<()> {
+    Err(std::io::Error::other(
+        "This prototype uses Windows as the server; run client mode on the Mac.",
+    ))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Edge {
     Left,
     Right,
+    Both,
 }
 
 impl Edge {
@@ -29,8 +24,21 @@ impl Edge {
         match value {
             "left" => Ok(Self::Left),
             "right" => Ok(Self::Right),
-            _ => Err("edge must be left or right".to_string()),
+            "both" => Ok(Self::Both),
+            _ => Err("edge must be left, right, or both".to_string()),
         }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Both => "both",
+        }
+    }
+
+    pub fn allows(self, side: Self) -> bool {
+        self == Self::Both || self == side
     }
 }
 

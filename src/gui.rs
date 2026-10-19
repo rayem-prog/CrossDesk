@@ -275,6 +275,7 @@ impl ConfigView {
             edge: match config.edge {
                 Edge::Left => "left",
                 Edge::Right => "right",
+                Edge::Both => "both",
             }
             .to_string(),
             scroll_scale: config.scroll_scale,

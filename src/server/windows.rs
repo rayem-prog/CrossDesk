@@ -1,19 +1,28 @@
+use crate::desktop::{DesktopLayout, MonitorRect};
+use crate::secure::SecureStream;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::mem::{size_of, zeroed};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpListener};
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+use windows_sys::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
+use windows_sys::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+};
 
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_SCROLL;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_MENU, VK_SCROLL,
+};
 use windows_sys::Win32::UI::Input::{
     GetRawInputData, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
     RID_INPUT, RIDEV_INPUTSINK, RIM_TYPEMOUSE, RegisterRawInputDevices,
@@ -21,15 +30,15 @@ use windows_sys::Win32::UI::Input::{
 use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, ClipCursor, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GetMessageW, GetSystemMetrics, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_UP,
-    LLMHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, PostMessageW, PostQuitMessage, RegisterClassW,
-    SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNA, SetCursorPos, SetLayeredWindowAttributes,
-    SetProcessDPIAware, SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_DROPFILES, WM_INPUT, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
-    WM_XBUTTONUP, WNDCLASSW, WS_EX_ACCEPTFILES, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP, XBUTTON1, XBUTTON2,
+    GetCursorPos, GetMessageW, GetSystemMetrics, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED,
+    LLKHF_UP, LLMHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, PostMessageW, PostQuitMessage,
+    RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNA, SetCursorPos, SetLayeredWindowAttributes,
+    SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+    WH_MOUSE_LL, WM_APP, WM_DROPFILES, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+    WNDCLASSW, WS_EX_ACCEPTFILES, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP, XBUTTON1, XBUTTON2,
 };
 
 use super::{Edge, ServerConfig};
@@ -53,39 +62,84 @@ const CURSOR_LOCK_RADIUS: i32 = 24;
 const REMOTE_CLIPBOARD_SUPPRESS_WINDOW: Duration = Duration::from_millis(1200);
 const WM_DESKBRIDGE_STOP: u32 = WM_APP + 0x51;
 
+static CONNECTION_ALIVE: AtomicBool = AtomicBool::new(false);
+static STOP_WINDOW: AtomicUsize = AtomicUsize::new(0);
+
+pub fn request_stop() {
+    let window = STOP_WINDOW.load(Ordering::Acquire);
+    if window != 0 {
+        unsafe {
+            PostMessageW(window as HWND, WM_DESKBRIDGE_STOP, 0, 0);
+        }
+    }
+}
+
+fn connection_lost() {
+    CONNECTION_ALIVE.store(false, Ordering::Release);
+    request_stop();
+}
+
 static CAPTURE_STATE: OnceLock<Arc<Mutex<CaptureState>>> = OnceLock::new();
 static TRANSFER_WRITER: OnceLock<SharedWriter> = OnceLock::new();
 
 pub fn run(config: ServerConfig) -> std::io::Result<()> {
+    let key = crate::secure::load_key()?;
     unsafe {
-        SetProcessDPIAware();
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
-
     let listener = TcpListener::bind(&config.bind)?;
-    eprintln!("deskbridge server listening on {}", config.bind);
-    let (stream, addr, writer, remote_size, client_platform) = loop {
-        let (mut stream, addr) = listener.accept()?;
-        stream.set_nodelay(true)?;
-        eprintln!("client connected from {addr}");
-
-        let writer = SharedWriter::new(stream.try_clone()?);
-        if let Err(e) = writer.write(Frame::new(FrameKind::Hello, protocol::hello_payload())) {
-            eprintln!("failed to send hello to {addr}: {e}; waiting for another client");
-            continue;
-        }
-
-        match read_client_hello(&mut stream) {
-            Ok((remote_size, client_platform)) => {
-                break (stream, addr, writer, remote_size, client_platform);
-            }
-            Err(e) => {
-                eprintln!(
-                    "client {addr} disconnected during handshake: {e}; waiting for another client"
-                );
+    listener.set_nonblocking(true)?;
+    eprintln!(
+        "CrossDesk listening on {}; entry edges: {}",
+        config.bind,
+        config.edge.as_str()
+    );
+    eprintln!("Waiting for the Mac with the matching pairing key. Ctrl+C exits.");
+    while !crate::shutdown::requested() {
+        let (socket, address) = match listener.accept() {
+            Ok(peer) => peer,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(100));
                 continue;
             }
+            Err(error) => return Err(error),
+        };
+        let mut stream = match SecureStream::accept(socket, &key) {
+            Ok(stream) => stream,
+            Err(error) => {
+                eprintln!("Rejected connection from {address}: {error}");
+                continue;
+            }
+        };
+        let writer = SharedWriter::new(stream.try_clone()?);
+        let hello = writer.write(Frame::new(FrameKind::Hello, protocol::hello_payload()));
+        let peer = hello.and_then(|_| read_client_hello(&mut stream));
+        match peer {
+            Ok((remote_size, platform)) => {
+                if let Err(error) =
+                    run_session(&config, stream, address, writer, remote_size, platform)
+                {
+                    eprintln!("Session ended: {error}");
+                }
+                if !crate::shutdown::requested() {
+                    eprintln!("Windows control restored. Waiting for Mac to reconnect.");
+                }
+            }
+            Err(error) => eprintln!("Mac handshake incomplete: {error}"),
         }
-    };
+    }
+    Ok(())
+}
+
+fn run_session(
+    config: &ServerConfig,
+    stream: SecureStream,
+    addr: SocketAddr,
+    writer: SharedWriter,
+    remote_size: (i32, i32),
+    client_platform: Platform,
+) -> std::io::Result<()> {
+    let stop_stream = stream.try_clone()?;
     let remote_profile = ConnectionProfile::local_server(client_platform);
     eprintln!(
         "connection profile: {} -> {} ({})",
@@ -101,20 +155,12 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
 
     let clipboard_state = Arc::new(Mutex::new(ClipboardSyncState::default()));
     let input = InputEmitter::spawn(writer.clone());
-    let state = Arc::new(Mutex::new(CaptureState::new(
-        input,
-        config.edge,
-        remote_size,
-    )));
-    if CAPTURE_STATE.set(state).is_err() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "capture state already initialized",
-        ));
+    let state = CaptureState::new(input, config.edge, remote_size);
+    if let Some(existing) = CAPTURE_STATE.get() {
+        *existing.lock().unwrap() = state;
+    } else {
+        let _ = CAPTURE_STATE.set(Arc::new(Mutex::new(state)));
     }
-
-    spawn_inbound_reader(stream, Arc::clone(&clipboard_state));
-    spawn_clipboard_watcher(writer, clipboard_state);
 
     let drop_strip = if drop_strip_enabled() {
         Some(DropStrip::create(config.edge)?)
@@ -123,12 +169,34 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
         None
     };
     let raw_input = RawInputWindow::create()?;
+    let hooks = Hooks::install()?;
     let stop_window = raw_input.hwnd as usize;
+    STOP_WINDOW.store(stop_window, Ordering::Release);
+    CONNECTION_ALIVE.store(true, Ordering::Release);
+    let reader = spawn_inbound_reader(stream, Arc::clone(&clipboard_state));
+    let ping_writer = writer.clone();
+    let heartbeat = thread::spawn(move || {
+        while CONNECTION_ALIVE.load(Ordering::Acquire) {
+            if ping_writer
+                .write(Frame::new(FrameKind::Ping, Vec::new()))
+                .is_err()
+            {
+                connection_lost();
+                break;
+            }
+            for _ in 0..10 {
+                if !CONNECTION_ALIVE.load(Ordering::Acquire) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    });
+    spawn_clipboard_watcher(writer, clipboard_state);
     crate::shutdown::spawn_gui_stop_watcher(move || unsafe {
         PostMessageW(stop_window as HWND, WM_DESKBRIDGE_STOP, 0, 0);
     });
     eprintln!("raw mouse input registered for relative movement");
-    let hooks = Hooks::install()?;
     eprintln!(
         "input hooks installed; move the mouse through the configured edge to control the client"
     );
@@ -136,6 +204,9 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
         eprintln!("file drop strip active on the {:?} edge", config.edge);
     }
     message_loop();
+    CONNECTION_ALIVE.store(false, Ordering::Release);
+    STOP_WINDOW.store(0, Ordering::Release);
+    let _ = stop_stream.shutdown(Shutdown::Both);
     if let Some(state) = CAPTURE_STATE.get() {
         state.lock().unwrap().shutdown();
     } else {
@@ -144,30 +215,42 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
     drop(hooks);
     drop(raw_input);
     drop(drop_strip);
+    let _ = reader.join();
+    let _ = heartbeat.join();
     Ok(())
 }
 
-fn read_client_hello(stream: &mut TcpStream) -> std::io::Result<((i32, i32), Platform)> {
+fn read_client_hello(stream: &mut SecureStream) -> std::io::Result<((i32, i32), Platform)> {
     let frame = protocol::read_frame(stream)?;
     if frame.kind != FrameKind::Hello {
-        return Ok((
-            (DEFAULT_REMOTE_WIDTH, DEFAULT_REMOTE_HEIGHT),
-            Platform::Unknown,
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "client must send Hello before input capture starts",
         ));
     }
     let hello = protocol::decode_hello(&frame.payload)?;
     protocol::validate_version(hello)?;
-    let width = hello.screen_width.unwrap_or(DEFAULT_REMOTE_WIDTH as u32) as i32;
-    let height = hello.screen_height.unwrap_or(DEFAULT_REMOTE_HEIGHT as u32) as i32;
-    Ok(((width.max(1), height.max(1)), hello.platform))
+    let width = hello.screen_width.unwrap_or(0);
+    let height = hello.screen_height.unwrap_or(0);
+    if !(1..=32768).contains(&width) || !(1..=32768).contains(&height) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid remote screen dimensions",
+        ));
+    }
+    Ok(((width as i32, height as i32), hello.platform))
 }
 
-fn spawn_inbound_reader(mut stream: TcpStream, clipboard_state: Arc<Mutex<ClipboardSyncState>>) {
+fn spawn_inbound_reader(
+    mut stream: SecureStream,
+    clipboard_state: Arc<Mutex<ClipboardSyncState>>,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut clipboard = match Clipboard::new() {
             Ok(clipboard) => clipboard,
             Err(e) => {
                 eprintln!("clipboard receiver disabled: {e}");
+                connection_lost();
                 return;
             }
         };
@@ -179,9 +262,15 @@ fn spawn_inbound_reader(mut stream: TcpStream, clipboard_state: Arc<Mutex<Clipbo
                 Ok(frame) => frame,
                 Err(e) => {
                     eprintln!("connection closed: {e}");
-                    std::process::exit(1);
+                    connection_lost();
+                    break;
                 }
             };
+            if !crate::transport::clipboard_enabled() && frame.kind != FrameKind::Pong {
+                eprintln!("Unexpected client frame in input-only mode");
+                connection_lost();
+                break;
+            }
             match frame.kind {
                 FrameKind::Clipboard => match protocol::decode_clipboard(&frame.payload) {
                     Ok(payload) => {
@@ -219,10 +308,13 @@ fn spawn_inbound_reader(mut stream: TcpStream, clipboard_state: Arc<Mutex<Clipbo
                 _ => {}
             }
         }
-    });
+    })
 }
 
 fn spawn_clipboard_watcher(writer: SharedWriter, clipboard_state: Arc<Mutex<ClipboardSyncState>>) {
+    if !crate::transport::clipboard_enabled() {
+        return;
+    }
     thread::spawn(move || {
         let mut clipboard = match Clipboard::new() {
             Ok(clipboard) => clipboard,
@@ -499,7 +591,7 @@ impl DropStrip {
 
         let screen = screen_size();
         let x = match edge {
-            Edge::Right => screen.0.saturating_sub(DROP_STRIP_WIDTH),
+            Edge::Right | Edge::Both => screen.0.saturating_sub(DROP_STRIP_WIDTH),
             Edge::Left => 0,
         };
         let hwnd = unsafe {
@@ -666,17 +758,24 @@ struct CaptureState {
     input: InputEmitter,
     pointer: PointerRouter,
     win_size: (i32, i32),
+    desktop: DesktopLayout,
+    desktop_updated: Instant,
+    local_keys: HashSet<u16>,
     pressed_keys: HashSet<u16>,
     pressed_buttons: HashSet<MouseButton>,
 }
 
 impl CaptureState {
     fn new(input: InputEmitter, edge: Edge, remote_size: (i32, i32)) -> Self {
-        let win_size = screen_size();
+        let desktop = desktop_layout();
+        let win_size = desktop.size();
         Self {
             input,
             pointer: PointerRouter::new(edge, win_size, remote_size),
             win_size,
+            desktop,
+            desktop_updated: Instant::now(),
+            local_keys: HashSet::new(),
             pressed_keys: HashSet::new(),
             pressed_buttons: HashSet::new(),
         }
@@ -684,6 +783,13 @@ impl CaptureState {
 
     fn handle_keyboard(&mut self, message: u32, hook: &KBDLLHOOKSTRUCT) -> bool {
         if !self.pointer.is_remote() {
+            let code = normalized_scancode(hook);
+            if matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN) {
+                self.local_keys.insert(code);
+            }
+            if matches!(message, WM_KEYUP | WM_SYSKEYUP) {
+                self.local_keys.remove(&code);
+            }
             return false;
         }
         let down = matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN);
@@ -691,7 +797,10 @@ impl CaptureState {
         if !down && !up {
             return true;
         }
-        if hook.vkCode == VK_SCROLL as u32 && down {
+        let emergency_chord = hook.vkCode == VK_ESCAPE as u32
+            && unsafe { GetAsyncKeyState(VK_CONTROL as i32) } < 0
+            && unsafe { GetAsyncKeyState(VK_MENU as i32) } < 0;
+        if down && (hook.vkCode == VK_SCROLL as u32 || emergency_chord) {
             self.deactivate();
             return true;
         }
@@ -745,10 +854,19 @@ impl CaptureState {
         if (hook.flags & LLMHF_INJECTED) != 0 {
             return false;
         }
-        self.win_size = screen_size();
-        self.pointer.update_local_size(self.win_size);
+        if self.desktop_updated.elapsed() >= Duration::from_secs(1) {
+            self.desktop = desktop_layout();
+            self.win_size = self.desktop.size();
+            self.pointer.update_local_size(self.win_size);
+            self.desktop_updated = Instant::now();
+        }
+        let (local_x, local_y) = self.desktop.local_point(hook.pt.x, hook.pt.y);
+        if !self.local_keys.is_empty() {
+            self.pointer.calibrate_local_position(local_x, local_y);
+            return false;
+        }
         if let MotionAction::EnterRemote { x, y } =
-            self.pointer.observe_local_motion(hook.pt.x, hook.pt.y)
+            self.pointer.observe_local_motion(local_x, local_y)
         {
             self.activate(x, y);
             true
@@ -759,6 +877,22 @@ impl CaptureState {
 
     fn handle_raw_mouse_delta(&mut self, dx: i32, dy: i32) {
         if !self.pointer.is_remote() {
+            // Windows clamps pixel coordinates at an edge. Raw motion still
+            // reports an outward push, including after releasing a held key.
+            if self.local_keys.is_empty() {
+                let mut point = POINT { x: 0, y: 0 };
+                if unsafe { GetCursorPos(&mut point) } != 0 {
+                    let (x, y) = self.desktop.local_point(point.x, point.y);
+                    if (x == 0 && dx < 0) || (x == self.win_size.0 - 1 && dx > 0) {
+                        self.pointer.calibrate_local_position(x, y);
+                        if let MotionAction::EnterRemote { x, y } =
+                            self.pointer.observe_local_delta(dx, 0)
+                        {
+                            self.activate(x, y);
+                        }
+                    }
+                }
+            }
             return;
         }
         match self
@@ -774,7 +908,6 @@ impl CaptureState {
     }
 
     fn activate(&mut self, remote_x: i32, remote_y: i32) {
-        self.win_size = screen_size();
         self.send_input(InputEvent::MouseEnter {
             x: remote_x,
             y: remote_y,
@@ -794,6 +927,7 @@ impl CaptureState {
     }
 
     fn finish_remote_session(&mut self, x: i32, y: i32) {
+        self.local_keys.extend(self.pressed_keys.iter().copied());
         for scancode in self.pressed_keys.drain().collect::<Vec<_>>() {
             self.send_input(InputEvent::Key {
                 scancode,
@@ -808,6 +942,7 @@ impl CaptureState {
         }
         self.send_input(InputEvent::MouseLeave);
         unlock_cursor();
+        let (x, y) = self.desktop.return_point(x, y);
         unsafe {
             SetCursorPos(x, y);
         }
@@ -815,7 +950,12 @@ impl CaptureState {
     }
 
     fn anchor(&self) -> (i32, i32) {
-        (self.win_size.0 / 2, self.win_size.1 / 2)
+        unsafe {
+            (
+                GetSystemMetrics(SM_CXSCREEN).max(1) / 2,
+                GetSystemMetrics(SM_CYSCREEN).max(1) / 2,
+            )
+        }
     }
 
     fn lock_cursor_to_anchor(&self) {
@@ -858,6 +998,7 @@ impl CaptureState {
         } else {
             unlock_cursor();
         }
+        self.input.stop();
     }
 
     fn send_wheel(&self, horizontal: i16, vertical: i16) {
@@ -872,22 +1013,38 @@ impl CaptureState {
     }
 }
 
-#[derive(Clone)]
 struct InputEmitter {
-    sender: Sender<InputEvent>,
+    sender: Option<Sender<InputEvent>>,
+    worker: Option<thread::JoinHandle<()>>,
 }
 
 impl InputEmitter {
     fn spawn(writer: SharedWriter) -> Self {
         let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || input_writer_loop(writer, receiver));
-        Self { sender }
+        let worker = thread::spawn(move || input_writer_loop(writer, receiver));
+        Self {
+            sender: Some(sender),
+            worker: Some(worker),
+        }
     }
 
     fn send(&self, event: InputEvent) {
-        if let Err(e) = self.sender.send(event) {
-            eprintln!("input queue closed: {e}");
+        if let Some(sender) = &self.sender {
+            if let Err(e) = sender.send(event) {
+                eprintln!("input queue closed: {e}");
+            }
         }
+    }
+    fn stop(&mut self) {
+        self.sender.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+impl Drop for InputEmitter {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -1100,6 +1257,7 @@ fn write_input_event(writer: &SharedWriter, event: InputEvent, log: &mut InputSe
     let encoded = protocol::encode_input(&event);
     if let Err(e) = writer.write(Frame::new(FrameKind::Input, encoded)) {
         eprintln!("input send failed after {} sent event(s): {e}", log.count);
+        connection_lost();
         return;
     }
     log.count += 1;
@@ -1205,4 +1363,58 @@ fn clamp(value: i32, min: i32, max: i32) -> i32 {
 fn last_os_error(context: &str) -> std::io::Error {
     let error = std::io::Error::last_os_error();
     std::io::Error::new(error.kind(), format!("{context}: {error}"))
+}
+
+fn desktop_layout() -> DesktopLayout {
+    unsafe extern "system" fn collect(
+        _monitor: HMONITOR,
+        _dc: HDC,
+        rect: *mut RECT,
+        data: LPARAM,
+    ) -> i32 {
+        if !rect.is_null() {
+            let r = unsafe { *rect };
+            let monitors = unsafe { &mut *(data as *mut Vec<MonitorRect>) };
+            monitors.push(MonitorRect {
+                left: r.left,
+                top: r.top,
+                right: r.right,
+                bottom: r.bottom,
+            });
+        }
+        1
+    }
+    let mut monitors = Vec::<MonitorRect>::new();
+    unsafe {
+        EnumDisplayMonitors(
+            ptr::null_mut(),
+            ptr::null(),
+            Some(collect),
+            (&mut monitors as *mut Vec<MonitorRect>) as LPARAM,
+        );
+    }
+    if monitors.is_empty() {
+        let (width, height) = screen_size();
+        monitors.push(MonitorRect {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        });
+    }
+    DesktopLayout::new(monitors)
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+    #[test]
+    fn native_hook_registration_and_hidden_window_cleanup_work() {
+        // No capture state is installed in this test: callbacks pass all user
+        // input through, and the cursor is never moved or constrained.
+        let window = RawInputWindow::create().unwrap();
+        let hooks = Hooks::install().unwrap();
+        drop(hooks);
+        drop(window);
+    }
 }

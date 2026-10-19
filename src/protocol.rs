@@ -3,9 +3,9 @@ use std::path::PathBuf;
 
 use crate::platform::Platform;
 
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 4;
 pub const CHUNK_SIZE: usize = 16 * 1024;
-pub const MAX_FRAME_PAYLOAD_SIZE: usize = 64 * 1024 * 1024;
+pub const MAX_FRAME_PAYLOAD_SIZE: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -20,6 +20,8 @@ pub enum FrameKind {
     DragUpdate = 8,
     DragEnd = 9,
     Error = 10,
+    Ping = 11,
+    Pong = 12,
 }
 
 impl FrameKind {
@@ -35,6 +37,8 @@ impl FrameKind {
             8 => Ok(Self::DragUpdate),
             9 => Ok(Self::DragEnd),
             10 => Ok(Self::Error),
+            11 => Ok(Self::Ping),
+            12 => Ok(Self::Pong),
             _ => Err(invalid("unknown frame kind")),
         }
     }

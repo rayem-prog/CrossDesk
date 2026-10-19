@@ -3,3 +3,7 @@
 .DS_Store
 web/node_modules
 gen/
+
+*.key
+mac-server.txt
+/test-results
