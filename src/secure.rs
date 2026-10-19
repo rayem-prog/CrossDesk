@@ -83,6 +83,9 @@ impl SecureStream {
     }
 
     fn handshake(mut stream: TcpStream, key: &[u8; 32], initiator: bool) -> io::Result<Self> {
+        // Accepted sockets inherit a nonblocking Windows listener's mode.
+        // Record framing uses read_exact/write_all with bounded timeouts.
+        stream.set_nonblocking(false)?;
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(LIVENESS_TIMEOUT))?;
         stream.set_write_timeout(Some(Duration::from_secs(2)))?;
@@ -240,6 +243,46 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> io::Error {
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    #[test]
+    fn accepted_nonblocking_socket_waits_for_handshake_and_delayed_hello() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+        let peer = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            let socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        assert!(std::time::Instant::now() < deadline);
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept failed: {error}"),
+                }
+            };
+            // Windows accepts sockets with the listener's nonblocking mode.
+            // Force it here too so this regression is covered on every OS.
+            socket.set_nonblocking(true).unwrap();
+            ready_tx.send(()).unwrap();
+            let mut server = SecureStream::accept(socket, &[42; 32]).unwrap();
+            server.write_all(b"server hello").unwrap();
+            let mut hello = [0; 12];
+            server.read_exact(&mut hello).unwrap();
+            assert_eq!(&hello, b"client hello");
+        });
+        let socket = TcpStream::connect(address).unwrap();
+        ready_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        std::thread::sleep(Duration::from_millis(75));
+        let mut client = SecureStream::handshake(socket, &[42; 32], true).unwrap();
+        let mut hello = [0; 12];
+        client.read_exact(&mut hello).unwrap();
+        assert_eq!(&hello, b"server hello");
+        std::thread::sleep(Duration::from_millis(75));
+        client.write_all(b"client hello").unwrap();
+        peer.join().unwrap();
+    }
 
     #[test]
     fn encrypted_bidirectional_stream_handles_partial_reads_and_large_payloads() {

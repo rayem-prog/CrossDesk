@@ -3,7 +3,7 @@
 Environment: Windows 11 x64; Rust 1.99.1; x86_64-pc-windows-gnu.
 
 - Windows release executable built locally.
-- 26 tests passed: both-edge routing, all four transitions, fast edge crossing,
+- 27 tests passed: both-edge routing, all four transitions, fast edge crossing,
   vertical mapping, small dimensions, negative and staggered desktop coordinates,
   internal monitor joins, held-button behavior, emergency release state,
   protocol validation, malformed keys, pairing mismatch, ciphertext tampering,
@@ -16,6 +16,10 @@ Environment: Windows 11 x64; Rust 1.99.1; x86_64-pc-windows-gnu.
 - The Windows executable imports only Windows system DLLs; no extra runtime DLLs
   are needed. Its help command ran outside the developer toolchain environment.
 - Clippy completed successfully with style suggestions in retained upstream code.
+- Reproduced Windows error 10035 with an accepted nonblocking socket. The added
+  regression passes after restoring blocking mode before the encrypted handshake,
+  including delayed handshake data and a delayed client hello. Read/write timeouts
+  remain enabled.
 
 Pending real-device checks:
 
