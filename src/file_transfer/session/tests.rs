@@ -208,9 +208,14 @@ fn cancellation_removes_partial_batch_and_next_copy_can_succeed() {
         std::fs::read_dir(&destination).ok().is_some_and(|dirs| {
             dirs.flatten().any(|dir| {
                 std::fs::read_dir(dir.path()).ok().is_some_and(|files| {
-                    files
-                        .flatten()
-                        .any(|f| f.metadata().is_ok_and(|m| m.len() > 0))
+                    // Windows directory enumeration can report the old file size
+                    // until the writer closes. Query a live handle so cancellation
+                    // happens during data transfer, before FileCommit publishes it.
+                    files.flatten().any(|f| {
+                        std::fs::File::open(f.path())
+                            .and_then(|file| file.metadata())
+                            .is_ok_and(|m| m.len() > 0)
+                    })
                 })
             })
         })
@@ -221,6 +226,10 @@ fn cancellation_removes_partial_batch_and_next_copy_can_succeed() {
     let batch = right.done.recv_timeout(Duration::from_secs(3)).unwrap();
     assert_eq!(std::fs::read(&batch.files[0]).unwrap(), vec![77; 100_000]);
     assert_eq!(std::fs::read_dir(root.join("right")).unwrap().count(), 1);
+    assert!(matches!(
+        right.done.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
     drop(batch);
     drop(left);
     drop(right);
