@@ -1,5 +1,9 @@
 // CrossDesk image clipboard changes: 2026-10-20 (GPL-3.0-only).
 use super::{Clipboard, ClipboardApi};
+use crate::file_transfer::{
+    session::{CompletedBatch, FileSender, FileSession},
+    wire,
+};
 use crate::image_transfer::{self, Incoming, Transfer};
 use crate::protocol::{ClipboardPayload, Frame, FrameKind};
 use crate::transport::SharedWriter;
@@ -36,15 +40,50 @@ struct Delivery {
     transfer: Transfer,
     revision: u64,
 }
-#[derive(Default)]
+enum RemoteDelivery {
+    Image(Delivery),
+    Files(CompletedBatch),
+}
+impl RemoteDelivery {
+    fn id(&self) -> [u8; 16] {
+        match self {
+            Self::Image(v) => v.transfer.id,
+            Self::Files(v) => v.id,
+        }
+    }
+}
+fn enqueue(mailbox: &Mailbox, delivery: RemoteDelivery, writer: &SharedWriter) {
+    let old = mailbox.pending.lock().unwrap().replace(delivery);
+    if let Some(old) = old {
+        let _ = writer.write(wire::result(old.id(), 1));
+    }
+    mailbox.changed.notify_all();
+}
 struct Mailbox {
-    pending: Mutex<Option<Delivery>>,
+    pending: Mutex<Option<RemoteDelivery>>,
+    file_sender: Mutex<Option<FileSender>>,
+    images_enabled: AtomicBool,
     changed: Condvar,
     stop: AtomicBool,
 }
 
-pub struct ImageSession {
+impl Default for Mailbox {
+    fn default() -> Self {
+        Self {
+            pending: Mutex::new(None),
+            file_sender: Mutex::new(None),
+            images_enabled: AtomicBool::new(true),
+            changed: Condvar::new(),
+            stop: AtomicBool::new(false),
+        }
+    }
+}
+
+pub struct ClipboardSession {
     enabled: bool,
+    image_enabled: bool,
+    file_session: Option<FileSession>,
+    writer: SharedWriter,
     incoming: Incoming,
     revision: u64,
     probe: Option<Clipboard>,
@@ -52,18 +91,58 @@ pub struct ImageSession {
     worker: Option<JoinHandle<()>>,
 }
 
-impl ImageSession {
-    pub fn start(writer: SharedWriter, enabled: bool) -> io::Result<Self> {
+impl ClipboardSession {
+    pub fn start(
+        writer: SharedWriter,
+        image_enabled: bool,
+        file_enabled: bool,
+    ) -> io::Result<Self> {
+        let enabled = image_enabled || file_enabled;
         let mailbox = Arc::new(Mailbox::default());
+        mailbox
+            .images_enabled
+            .store(image_enabled, Ordering::Release);
+        let file_session = if file_enabled {
+            let target = mailbox.clone();
+            let replies = writer.clone();
+            let session = FileSession::start(
+                writer.clone(),
+                std::env::temp_dir().join("crossdesk-file-clipboard"),
+                move |batch| {
+                    enqueue(&target, RemoteDelivery::Files(batch), &replies);
+                },
+            )?;
+            *mailbox.file_sender.lock().unwrap() = Some(session.sender.clone());
+            Some(session)
+        } else {
+            None
+        };
+        let worker_writer = writer.clone();
         let (probe, worker) = if enabled {
-            let clipboard = Clipboard::new()?;
+            let mut clipboard = Clipboard::new()?;
             let probe = Clipboard::new()?;
             let baseline = clipboard.change_id()?;
+            // A busy clipboard must not prevent keyboard/mouse startup. Skip cleanup
+            // when its current file references cannot be read safely.
+            if let Ok(snapshot) = clipboard.read() {
+                let protected = match snapshot {
+                    Some(ClipboardPayload::Files(files)) => files,
+                    _ => Vec::new(),
+                };
+                cleanup_cache(
+                    &std::env::temp_dir().join("crossdesk-image-clipboard"),
+                    &protected,
+                );
+                cleanup_cache(
+                    &std::env::temp_dir().join("crossdesk-file-clipboard"),
+                    &protected,
+                );
+            }
             let worker_mailbox = Arc::clone(&mailbox);
             let worker = thread::Builder::new()
-                .name("image-clipboard".into())
+                .name("clipboard-sync".into())
                 .spawn(move || {
-                    worker_loop(clipboard, baseline, writer, worker_mailbox);
+                    worker_loop(clipboard, baseline, worker_writer, worker_mailbox);
                 })?;
             (Some(probe), Some(worker))
         } else {
@@ -71,14 +150,25 @@ impl ImageSession {
         };
         eprintln!(
             "image clipboard: {}",
-            if enabled {
+            if image_enabled {
                 "on (PNG/JPG files and image content)"
+            } else {
+                "off (disabled by one of the peers)"
+            }
+        );
+        eprintln!(
+            "file clipboard: {}",
+            if file_enabled {
+                "on (ordinary files; 512 MiB/file, 2 GiB/batch, 64 files)"
             } else {
                 "off (disabled by one of the peers)"
             }
         );
         Ok(Self {
             enabled,
+            image_enabled,
+            file_session,
+            writer,
             incoming: Incoming::default(),
             revision: 0,
             probe,
@@ -90,13 +180,42 @@ impl ImageSession {
         self.enabled
     }
     pub fn handles(kind: FrameKind) -> bool {
-        matches!(
-            kind,
-            FrameKind::ImageStart | FrameKind::ImageChunk | FrameKind::ImageEnd
-        )
+        wire::handles(kind)
+            || matches!(
+                kind,
+                FrameKind::ImageStart | FrameKind::ImageChunk | FrameKind::ImageEnd
+            )
     }
     pub fn receive(&mut self, frame: Frame) -> io::Result<()> {
-        if !self.enabled {
+        if frame.kind == FrameKind::TransferResult {
+            let (_, status) = wire::parse_result(&frame.payload)?;
+            eprintln!(
+                "destination clipboard result: {}",
+                match status {
+                    0 => "published; ready to paste",
+                    1 => "skipped; a newer local copy exists (copy again to retry)",
+                    _ => "rejected or failed; see destination log",
+                }
+            );
+            return Ok(());
+        }
+        if wire::handles(frame.kind) {
+            if let Some(files) = &self.file_session {
+                let revision = if frame.kind == FrameKind::FileOffer {
+                    self.probe.as_ref().unwrap().change_id()?
+                } else {
+                    0
+                };
+                return files.receive(frame, revision);
+            }
+            if let Ok((id, serial)) = wire::identity(&frame) {
+                let _ = self.writer.write(wire::ack(id, serial, 2));
+            }
+            return Err(image_transfer::invalid(
+                "file synchronization was not negotiated",
+            ));
+        }
+        if !self.image_enabled {
             return Err(image_transfer::invalid(
                 "image synchronization was not negotiated",
             ));
@@ -107,20 +226,26 @@ impl ImageSession {
         }
         if let Some(transfer) = self.incoming.receive(frame)? {
             // The newest complete transfer replaces one that has not been applied.
-            *self.mailbox.pending.lock().unwrap() = Some(Delivery {
-                transfer,
-                revision: self.revision,
-            });
-            self.mailbox.changed.notify_one();
+            enqueue(
+                &self.mailbox,
+                RemoteDelivery::Image(Delivery {
+                    transfer,
+                    revision: self.revision,
+                }),
+                &self.writer,
+            );
         }
         Ok(())
     }
 }
 
-impl Drop for ImageSession {
+impl Drop for ClipboardSession {
     fn drop(&mut self) {
         self.mailbox.stop.store(true, Ordering::Release);
         self.mailbox.changed.notify_all();
+        if let Some(files) = &self.file_session {
+            files.stop();
+        }
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -136,28 +261,38 @@ fn worker_loop<C: ClipboardApi>(
     let mut state = SyncState::default();
     let mut last_remote_revision = None;
     let cache = std::env::temp_dir().join("crossdesk-image-clipboard");
-    // Read only to protect an existing file clipboard from cache cleanup; never send this baseline.
-    let protected = match clipboard.read() {
-        Ok(Some(ClipboardPayload::Files(files))) => files,
-        _ => Vec::new(),
-    };
-    cleanup_cache(&cache, &protected);
+    // Initialize the platform boundary without ever transmitting startup contents.
+    let _ = clipboard.read();
+    let file_sender = mailbox.file_sender.lock().unwrap().clone();
     while !mailbox.stop.load(Ordering::Acquire) && !crate::shutdown::requested() {
         let incoming = mailbox.pending.lock().unwrap().take();
         if let Some(delivery) = incoming {
-            match apply_delivery(
-                &mut clipboard,
-                delivery,
-                &cache,
-                last_remote_revision,
-                &mut state,
-            ) {
-                Ok(Some(next_revision)) => {
-                    revision = next_revision;
-                    last_remote_revision = Some(next_revision);
+            let id = delivery.id();
+            let result = match delivery {
+                RemoteDelivery::Image(delivery) => apply_delivery(
+                    &mut clipboard,
+                    delivery,
+                    &cache,
+                    last_remote_revision,
+                    &mut state,
+                ),
+                RemoteDelivery::Files(mut batch) => {
+                    apply_file_delivery(&mut clipboard, &mut batch, last_remote_revision)
                 }
-                Ok(None) => {}
-                Err(error) => eprintln!("image clipboard receive skipped: {error}"),
+            };
+            let status = match &result {
+                Ok(Some(_)) => 0,
+                Ok(None) => 1,
+                Err(_) => 2,
+            };
+            let _ = writer.write(wire::result(id, status));
+            match result {
+                Ok(Some(next)) => {
+                    revision = next;
+                    last_remote_revision = Some(next);
+                }
+                Err(e) => eprintln!("clipboard publication failed: {e}"),
+                _ => {}
             }
         }
         match clipboard.change_id() {
@@ -171,6 +306,27 @@ fn worker_loop<C: ClipboardApi>(
                         revision = current;
                         if matches!(payload, ClipboardPayload::Text(_)) {
                             state = SyncState::default();
+                            continue;
+                        }
+                        if let (Some(sender), ClipboardPayload::Files(files)) =
+                            (&file_sender, &payload)
+                        {
+                            let result = sender.send(files, || {
+                                mailbox.stop.load(Ordering::Acquire)
+                                    || clipboard.change_id().ok() != Some(current)
+                            });
+                            if let Err(error) = result {
+                                eprintln!("file clipboard send skipped: {error}");
+                                if matches!(
+                                    error.kind(),
+                                    io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+                                ) {
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
+                        if !mailbox.images_enabled.load(Ordering::Acquire) {
                             continue;
                         }
                         match Transfer::from_clipboard(&payload).and_then(|transfer| {
@@ -293,12 +449,53 @@ fn apply_delivery<C: ClipboardApi>(
     }
     match clipboard.read() {
         Ok(Some(readback))
-            if readback == payload && clipboard.change_id()? == published_revision => {}
+            if super::same_payload(&readback, &payload)
+                && clipboard.change_id()? == published_revision => {}
         _ => return Ok(None),
     }
     state.note_remote(fingerprint);
     eprintln!("image clipboard received: {count} image(s); ready to paste");
     Ok(Some(published_revision))
+}
+
+fn apply_file_delivery<C: ClipboardApi>(
+    clipboard: &mut C,
+    batch: &mut CompletedBatch,
+    last_remote: Option<u64>,
+) -> io::Result<Option<u64>> {
+    let payload = ClipboardPayload::Files(batch.files.clone());
+    for attempt in 0..3 {
+        let current = clipboard.change_id()?;
+        if !may_publish_remote(batch.revision, current, last_remote) {
+            return Ok(None);
+        }
+        match clipboard.publish_revision_if_current(&payload, current) {
+            Ok(Some(published)) => {
+                // Once native publication succeeded, a file manager may be reading these paths.
+                batch.retain();
+                if clipboard.change_id()? != published {
+                    return Ok(None);
+                }
+                match clipboard.read() {
+                    Ok(Some(readback))
+                        if super::same_payload(&readback, &payload)
+                            && clipboard.change_id()? == published =>
+                    {
+                        eprintln!(
+                            "file clipboard received: {} file(s); ready to paste",
+                            batch.files.len()
+                        );
+                        return Ok(Some(published));
+                    }
+                    _ => return Ok(None),
+                }
+            }
+            Ok(None) => return Ok(None),
+            Err(e) if attempt == 2 => return Err(e),
+            Err(_) => thread::sleep(Duration::from_millis(50)),
+        }
+    }
+    unreachable!()
 }
 
 fn remove_unpublished(payload: &ClipboardPayload, root: &Path) {
@@ -492,16 +689,19 @@ mod tests {
                 .into_raw(),
             vec![7, 2, 3, 127]
         );
-        *mailbox.pending.lock().unwrap() = Some(Delivery {
+        *mailbox.pending.lock().unwrap() = Some(RemoteDelivery::Image(Delivery {
             transfer: Transfer::from_clipboard(&ClipboardPayload::Bitmap(png(8))).unwrap(),
             revision: 1,
-        });
+        }));
         mailbox.changed.notify_all();
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         while memory.lock().unwrap().2 == 0 && std::time::Instant::now() < deadline {
             thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(memory.lock().unwrap().2, 1);
+        let receipt = protocol::read_frame(&mut peer).unwrap();
+        assert_eq!(receipt.kind, FrameKind::TransferResult);
+        assert_eq!(wire::parse_result(&receipt.payload).unwrap().1, 0);
         peer.set_read_timeout(Some(Duration::from_millis(300)))
             .unwrap();
         assert!(
@@ -699,3 +899,6 @@ mod review_regressions {
         );
     }
 }
+
+#[cfg(test)]
+mod file_tests;

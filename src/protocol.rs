@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::platform::Platform;
 
-pub const VERSION: u16 = 5;
+pub const VERSION: u16 = 6;
 pub const CHUNK_SIZE: usize = 16 * 1024;
 pub const MAX_FRAME_PAYLOAD_SIZE: usize = 64 * 1024;
 
@@ -26,6 +26,13 @@ pub enum FrameKind {
     ImageStart = 13,
     ImageChunk = 14,
     ImageEnd = 15,
+    FileOffer = 16,
+    FileData = 17,
+    FileSeal = 18,
+    FileCommit = 19,
+    FileAck = 20,
+    FileCancel = 21,
+    TransferResult = 22,
 }
 
 impl FrameKind {
@@ -46,6 +53,13 @@ impl FrameKind {
             13 => Ok(Self::ImageStart),
             14 => Ok(Self::ImageChunk),
             15 => Ok(Self::ImageEnd),
+            16 => Ok(Self::FileOffer),
+            17 => Ok(Self::FileData),
+            18 => Ok(Self::FileSeal),
+            19 => Ok(Self::FileCommit),
+            20 => Ok(Self::FileAck),
+            21 => Ok(Self::FileCancel),
+            22 => Ok(Self::TransferResult),
             _ => Err(invalid("unknown frame kind")),
         }
     }
@@ -102,6 +116,7 @@ pub struct Hello {
     pub screen_width: Option<u32>,
     pub screen_height: Option<u32>,
     pub image_clipboard: bool,
+    pub file_clipboard: bool,
 }
 
 pub fn read_frame(reader: &mut impl Read) -> std::io::Result<Frame> {
@@ -142,7 +157,10 @@ pub fn write_frame_unflushed(writer: &mut impl Write, frame: &Frame) -> std::io:
 pub fn hello_payload() -> Vec<u8> {
     let mut out = VERSION.to_be_bytes().to_vec();
     out.push(Platform::local().as_byte());
-    out.push(u8::from(crate::transport::image_clipboard_enabled()));
+    out.push(
+        u8::from(crate::transport::image_clipboard_enabled())
+            | (u8::from(crate::transport::file_clipboard_enabled()) << 1),
+    );
     out
 }
 
@@ -165,7 +183,7 @@ pub fn decode_hello(payload: &[u8]) -> std::io::Result<Hello> {
         .unwrap_or(Platform::Unknown);
     let dimensions_offset = if version >= 5 { 4 } else { 3 };
     if version == VERSION && !matches!(payload.len(), 4 | 12) {
-        return Err(invalid("invalid v5 hello length"));
+        return Err(invalid("invalid v6 hello length"));
     }
     let (screen_width, screen_height) = if payload.len() >= dimensions_offset + 8 {
         (
@@ -194,6 +212,7 @@ pub fn decode_hello(payload: &[u8]) -> std::io::Result<Hello> {
         screen_width,
         screen_height,
         image_clipboard: version >= 5 && payload.get(3).is_some_and(|v| v & 1 != 0),
+        file_clipboard: version >= 6 && payload.get(3).is_some_and(|v| v & 2 != 0),
     })
 }
 
@@ -421,8 +440,9 @@ fn invalid_owned(message: String) -> std::io::Error {
 mod tests {
     use super::*;
     #[test]
-    fn v5_hello_decodes_capabilities_without_shifting_screen_dimensions() {
-        let hello = decode_hello(&[0, 5, 2, 1, 0, 0, 5, 232, 0, 0, 3, 214]).unwrap();
+    fn v6_hello_decodes_capabilities_without_shifting_screen_dimensions() {
+        let hello = decode_hello(&[0, 6, 2, 3, 0, 0, 5, 232, 0, 0, 3, 214]).unwrap();
+        assert!(hello.image_clipboard && hello.file_clipboard);
         assert_eq!(hello.screen_width, Some(1512));
         assert_eq!(hello.screen_height, Some(982));
         validate_version(hello).unwrap();
@@ -475,6 +495,7 @@ mod tests {
                 screen_width: None,
                 screen_height: None,
                 image_clipboard: false,
+                file_clipboard: false,
             })
             .is_err()
         );

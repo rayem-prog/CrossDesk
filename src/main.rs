@@ -59,6 +59,11 @@ fn main() -> ExitCode {
             env::set_var("CROSSDESK_IMAGE_CLIPBOARD", value);
         }
     }
+    if let Some(value) = value_after(&args, "--file-clipboard") {
+        unsafe {
+            env::set_var("CROSSDESK_FILE_CLIPBOARD", value);
+        }
+    }
     if let Err(error) = shutdown::install_signal_handler() {
         eprintln!("Cannot install shutdown handler: {error}");
         return ExitCode::FAILURE;
@@ -89,8 +94,19 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
     let verb = args.first().map(String::as_str).ok_or("missing command")?;
     let allowed: &[&str] = match verb {
         "keygen" => &["--out"],
-        "server" => &["--bind", "--edge", "--key-file", "--image-clipboard"],
-        "client" => &["--server", "--key-file", "--image-clipboard"],
+        "server" => &[
+            "--bind",
+            "--edge",
+            "--key-file",
+            "--image-clipboard",
+            "--file-clipboard",
+        ],
+        "client" => &[
+            "--server",
+            "--key-file",
+            "--image-clipboard",
+            "--file-clipboard",
+        ],
         "gui" => &[],
         _ => return Err(format!("unknown command: {verb}")),
     };
@@ -111,6 +127,9 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
     }
     if value_after(args, "--image-clipboard").is_some_and(|v| v != "on" && v != "off") {
         return Err("--image-clipboard must be on or off".into());
+    }
+    if value_after(args, "--file-clipboard").is_some_and(|v| v != "on" && v != "off") {
+        return Err("--file-clipboard must be on or off".into());
     }
     Ok(match verb {
         "keygen" => Command::Keygen {
@@ -140,13 +159,13 @@ fn print_usage() {
     println!(
         "CrossDesk {} - Windows keyboard/mouse -> Apple Silicon Mac
   crossdesk keygen [--out PATH]
-  crossdesk server [--bind 0.0.0.0:24920] [--edge both|left|right] [--key-file PATH] [--image-clipboard on|off]
-  crossdesk client --server WINDOWS_IP:24920 [--key-file PATH] [--image-clipboard on|off]
+  crossdesk server [--bind 0.0.0.0:24920] [--edge both|left|right] [--key-file PATH] [--image-clipboard on|off] [--file-clipboard on|off]
+  crossdesk client --server WINDOWS_IP:24920 [--key-file PATH] [--image-clipboard on|off] [--file-clipboard on|off]
 
 Use the same crossdesk.key on both machines. Both horizontal edges are enabled by default.
 Emergency release on Windows: Ctrl+Alt+Esc or Scroll Lock.
-Image clipboard sync is on by default. Copy screenshots or PNG/JPG files, then paste on the other computer.
-Both computers must run protocol v5. Text and arbitrary file sharing stay off by default.",
+Image and ordinary file clipboard sync are on by default. Copy screenshots, PDFs, documents or ZIP files after connecting.
+Both computers must run protocol v6. Files: 512 MiB each, 2 GiB/batch, 64 files. Text, directories and resume are outside this mode.",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -183,5 +202,18 @@ mod tests {
         assert!(parse_args(&args("client --server --key-file foo")).is_err());
         assert!(parse_args(&args("server --edge both --edge left")).is_err());
         assert!(parse_args(&args("server --edeg both")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod file_option_tests {
+    use super::*;
+    #[test]
+    fn ordinary_file_switch_accepts_on_off_and_rejects_invalid_values() {
+        let parse =
+            |s: &str| parse_args(&s.split_whitespace().map(str::to_string).collect::<Vec<_>>());
+        assert!(parse("server --file-clipboard off").is_ok());
+        assert!(parse("client --server 127.0.0.1:24920 --file-clipboard on").is_ok());
+        assert!(parse("server --file-clipboard maybe").is_err());
     }
 }

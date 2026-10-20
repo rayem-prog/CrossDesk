@@ -64,15 +64,7 @@ impl ClipboardApi for Clipboard {
             ClipboardPayload::Bitmap(data) => {
                 (WRITE_BITMAP_SCRIPT, crate::image_transfer::png_bytes(data)?)
             }
-            ClipboardPayload::Files(files) => (
-                WRITE_FILES_SCRIPT,
-                files
-                    .iter()
-                    .map(|p| p.to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join("\n")
-                    .into_bytes(),
-            ),
+            ClipboardPayload::Files(files) => (WRITE_FILES_SCRIPT, file_input(files)?),
             _ => {
                 if self.change_id()? != expected {
                     return Ok(None);
@@ -82,7 +74,7 @@ impl ClipboardApi for Clipboard {
             }
         };
         let script = format!(
-            "{}\n$.NSFileHandle.fileHandleWithStandardOutput.writeData($(String(Number($.NSPasteboard.generalPasteboard.changeCount))).dataUsingEncoding($.NSUTF8StringEncoding));",
+            "{}\n$.NSFileHandle.fileHandleWithStandardOutput.writeData($(String(crossdeskPublicationRevision)).dataUsingEncoding($.NSUTF8StringEncoding));",
             guarded_write_script(script, expected)
         );
         match write_filter("osascript", &["-l", "JavaScript", "-e", &script], &input) {
@@ -230,7 +222,6 @@ fn read_files_jxa() -> std::io::Result<Option<Vec<PathBuf>>> {
     let files = String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(PathBuf::from)
-        .filter(|path| path.exists())
         .collect::<Vec<_>>();
     if files.is_empty() {
         Ok(None)
@@ -259,7 +250,6 @@ end try
     let files = String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(PathBuf::from)
-        .filter(|path| path.exists())
         .collect::<Vec<_>>();
     if files.is_empty() {
         Ok(None)
@@ -298,17 +288,32 @@ if (found) $.NSFileHandle.fileHandleWithStandardOutput.writeData($.NSString.allo
     Ok(output.status.success() && !output.stdout.is_empty())
 }
 
+fn file_input(files: &[PathBuf]) -> std::io::Result<Vec<u8>> {
+    let image = files.len() == 1 && crate::clipboard::image_file_bytes(&files[0])?.is_some();
+    let mut input = if image {
+        "image\n".to_string()
+    } else {
+        "files\n".to_string()
+    };
+    for file in files {
+        let path = file
+            .to_str()
+            .ok_or_else(|| std::io::Error::other("file path is not UTF-8"))?;
+        if path.contains(['\n', '\r', '\0']) {
+            return Err(std::io::Error::other(
+                "file path contains an unsupported control character",
+            ));
+        }
+        input.push_str(path);
+        input.push('\n');
+    }
+    Ok(input.into_bytes())
+}
 fn write_files(files: &[PathBuf]) -> std::io::Result<()> {
-    let joined = files
-        .iter()
-        .map(|path| path.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let script = WRITE_FILES_SCRIPT;
     write_filter(
         "osascript",
-        &["-l", "JavaScript", "-e", script],
-        joined.as_bytes(),
+        &["-l", "JavaScript", "-e", WRITE_FILES_SCRIPT],
+        &file_input(files)?,
     )
     .map(|_| ())
 }
@@ -384,13 +389,19 @@ if (!image || image.isNil() || !image.isValid) throw new Error("invalid clipboar
 const tiff = image.TIFFRepresentation;
 const rep = $.NSBitmapImageRep.imageRepWithData(tiff);
 if (!rep || rep.isNil()) throw new Error("invalid image representation");
-const png = rep.representationUsingTypeProperties(4, $({}));
-if (!png || png.isNil()) throw new Error("cannot encode clipboard PNG");
+const token = $.NSUUID.UUID.UUIDString;
+const item = $.NSPasteboardItem.alloc.init;
+if (!item.setDataForType(data,"public.png")) throw new Error("prepare PNG failed");
+item.setDataForType(tiff,"public.tiff");
+item.setStringForType(token,"org.crossdesk.clipboard-origin");
 const pasteboard = $.NSPasteboard.generalPasteboard;
 pasteboard.clearContents;
-let wrote = pasteboard.setDataForType(data, "public.png");
-wrote = pasteboard.setDataForType(tiff, "public.tiff") || wrote;
-if (!wrote) throw new Error("set image data failed");
+if (!pasteboard.writeObjects($.NSArray.arrayWithObject(item))) throw new Error("set image data failed");
+// CrossDesk receipt boundary.
+const revision = Number(pasteboard.changeCount);
+const origin = pasteboard.stringForType("org.crossdesk.clipboard-origin");
+var crossdeskPublicationRevision = origin && !origin.isNil() && ObjC.unwrap(origin) === ObjC.unwrap(token) && Number(pasteboard.changeCount) === revision ? revision : 0;
+void 0;
 "#;
 
 const READ_FILES_SCRIPT: &str = r#"ObjC.import("AppKit");
@@ -448,40 +459,40 @@ if (items && !items.isNil()) {
 
 const WRITE_FILES_SCRIPT: &str = r#"ObjC.import("AppKit");
 ObjC.import("Foundation");
-const input = $.NSString.alloc.initWithDataEncoding(
-  $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile,
-  $.NSUTF8StringEncoding
-);
-const paths = ObjC.unwrap(input).split("\n").filter(Boolean);
-const urls = $.NSMutableArray.array;
-for (const path of paths) urls.addObject($.NSURL.fileURLWithPath(path));
-const pasteboard = $.NSPasteboard.generalPasteboard;
-pasteboard.clearContents;
-let wrote = pasteboard.writeObjects(urls);
-if (!wrote) {
-  const fallbackItems = $.NSMutableArray.array;
-  for (let i = 0; i < urls.count; i++) {
-    const url = urls.objectAtIndex(i);
-    const item = $.NSPasteboardItem.alloc.init;
-    item.setStringForType(url.absoluteString, "public.file-url");
-    item.setStringForType(url.absoluteString, "NSURLPboardType");
-    fallbackItems.addObject(item);
-  }
-  wrote = pasteboard.writeObjects(fallbackItems);
-}
-if (!wrote) throw new Error("write file URLs failed");
-if (paths.length === 1) {
-  const image = $.NSImage.alloc.initWithContentsOfFile(paths[0]);
-  if (image && !image.isNil() && image.isValid) {
-    const tiff = image.TIFFRepresentation;
-    const rep = $.NSBitmapImageRep.imageRepWithData(tiff);
-    if (rep && !rep.isNil()) {
-      const png = rep.representationUsingTypeProperties(4, $({}));
-      if (png && !png.isNil()) pasteboard.setDataForType(png, "public.png");
-      pasteboard.setDataForType(tiff, "public.tiff");
+const input = $.NSString.alloc.initWithDataEncoding($.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile,$.NSUTF8StringEncoding);
+const lines = ObjC.unwrap(input).split("\n");
+const imageAllowed = lines.shift() === "image";
+const paths = lines.filter(Boolean);
+const token = $.NSUUID.UUID.UUIDString;
+const items = $.NSMutableArray.array;
+for (const path of paths) {
+  const item = $.NSPasteboardItem.alloc.init;
+  const url = $.NSURL.fileURLWithPath(path);
+  if (!item.setStringForType(url.absoluteString,"public.file-url")) throw new Error("prepare file URL failed");
+  item.setStringForType(url.absoluteString,"NSURLPboardType");
+  item.setStringForType(token,"org.crossdesk.clipboard-origin");
+  if (imageAllowed && paths.length === 1) {
+    const image = $.NSImage.alloc.initWithContentsOfFile(path);
+    if (image && !image.isNil() && image.isValid) {
+      const tiff = image.TIFFRepresentation;
+      const rep = $.NSBitmapImageRep.imageRepWithData(tiff);
+      if (rep && !rep.isNil()) {
+        const png = rep.representationUsingTypeProperties(4,$({}));
+        if (png && !png.isNil()) item.setDataForType(png,"public.png");
+        item.setDataForType(tiff,"public.tiff");
+      }
     }
   }
+  items.addObject(item);
 }
+const pasteboard = $.NSPasteboard.generalPasteboard;
+pasteboard.clearContents;
+if (!pasteboard.writeObjects(items)) throw new Error("write file URLs failed");
+// CrossDesk receipt boundary.
+const revision = Number(pasteboard.changeCount);
+const origin = pasteboard.stringForType("org.crossdesk.clipboard-origin");
+var crossdeskPublicationRevision = origin && !origin.isNil() && ObjC.unwrap(origin) === ObjC.unwrap(token) && Number(pasteboard.changeCount) === revision ? revision : 0;
+void 0;
 "#;
 
 #[cfg(test)]
@@ -525,8 +536,8 @@ mod tests {
         let b = directory.join("第二张.png");
         std::fs::write(&a, fixture()).unwrap();
         std::fs::write(&b, fixture()).unwrap();
-        let input = format!("{}\n{}", a.display(), b.display());
-        isolated(WRITE_FILES_SCRIPT, &name, input.as_bytes());
+        let input = file_input(&[a.clone(), b.clone()]).unwrap();
+        isolated(WRITE_FILES_SCRIPT, &name, &input);
         let output = isolated(READ_FILES_SCRIPT, &name, &[]);
         let paths: Vec<_> = String::from_utf8(output)
             .unwrap()
@@ -543,7 +554,11 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("crossdesk-single-{}.png", std::process::id()));
         std::fs::write(&path, fixture()).unwrap();
-        isolated(WRITE_FILES_SCRIPT, &name, path.to_str().unwrap().as_bytes());
+        isolated(
+            WRITE_FILES_SCRIPT,
+            &name,
+            &file_input(&[path.clone()]).unwrap(),
+        );
         let output = isolated(READ_FILES_SCRIPT, &name, &[]);
         assert_eq!(
             String::from_utf8(output).unwrap().trim(),
@@ -581,5 +596,98 @@ mod tests {
         );
         let png = isolated(READ_BITMAP_SCRIPT, &name, &[]);
         assert_eq!(png, fixture());
+    }
+}
+
+#[cfg(test)]
+mod ordinary_file_tests {
+    use super::*;
+    fn isolated(script: &str, name: &str, input: &[u8]) -> Vec<u8> {
+        let script = script.replace(
+            "$.NSPasteboard.generalPasteboard",
+            &format!("$.NSPasteboard.pasteboardWithName(\"{name}\")"),
+        );
+        write_filter("osascript", &["-l", "JavaScript", "-e", &script], input).unwrap()
+    }
+    #[test]
+    fn named_pasteboard_publishes_pdf_zip_and_empty_file_without_a_bitmap() {
+        let name = format!("org.crossdesk.ordinary.{}", std::process::id());
+        let root =
+            std::env::temp_dir().join(format!("crossdesk-native-documents-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let files = vec![
+            root.join("报告-café.pdf"),
+            root.join("archive.zip"),
+            root.join("empty"),
+        ];
+        for (p, data) in files.iter().zip([b"%PDF\0".as_slice(), b"PK\x03\x04", b""]) {
+            std::fs::write(p, data).unwrap();
+        }
+        isolated(WRITE_FILES_SCRIPT, &name, &file_input(&files).unwrap());
+        let got = isolated(READ_FILES_SCRIPT, &name, &[]);
+        let got: Vec<_> = String::from_utf8(got)
+            .unwrap()
+            .lines()
+            .map(PathBuf::from)
+            .collect();
+        assert_eq!(got.len(), 3);
+        assert_eq!(std::fs::read(&got[0]).unwrap(), b"%PDF\0");
+        assert_eq!(std::fs::read(&got[1]).unwrap(), b"PK\x03\x04");
+        assert_eq!(std::fs::metadata(&got[2]).unwrap().len(), 0);
+        assert!(crate::clipboard::same_payload(
+            &ClipboardPayload::Files(got),
+            &ClipboardPayload::Files(files)
+        ));
+        assert!(isolated(READ_BITMAP_SCRIPT, &name, &[]).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn named_pasteboard_publication_receipt_precedes_a_subsequent_local_copy() {
+        let name = format!("org.crossdesk.receipt.{}", std::process::id());
+        let count_script = "ObjC.import('AppKit'); ObjC.import('Foundation'); $.NSFileHandle.fileHandleWithStandardOutput.writeData($(String(Number($.NSPasteboard.generalPasteboard.changeCount))).dataUsingEncoding($.NSUTF8StringEncoding));";
+        let before = String::from_utf8(isolated(count_script, &name, &[]))
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        let receipt_script = count_script.replace(
+            "Number($.NSPasteboard.generalPasteboard.changeCount)",
+            "crossdeskPublicationRevision",
+        );
+        let script = format!(
+            "{}\n{}",
+            guarded_write_script(WRITE_BITMAP_SCRIPT, before),
+            receipt_script
+        );
+        let pixels = image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 127]));
+        let mut data = std::io::Cursor::new(Vec::new());
+        pixels.write_to(&mut data, image::ImageFormat::Png).unwrap();
+        let receipt = String::from_utf8(isolated(&script, &name, data.get_ref()))
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert!(receipt > before);
+        isolated(WRITE_BITMAP_SCRIPT, &name, data.get_ref());
+        let current = String::from_utf8(isolated(count_script, &name, &[]))
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert!(current > receipt);
+    }
+    #[test]
+    fn identical_local_copy_during_publication_does_not_acquire_remote_origin() {
+        let name = format!("org.crossdesk.same-copy.{}", std::process::id());
+        let pixels = image::RgbaImage::from_pixel(1, 1, image::Rgba([4, 5, 6, 127]));
+        let mut data = std::io::Cursor::new(Vec::new());
+        pixels.write_to(&mut data, image::ImageFormat::Png).unwrap();
+        // Inject a normal application copy (identical PNG, no CrossDesk marker)
+        // after native publication but before its receipt is collected.
+        let script=WRITE_BITMAP_SCRIPT.replace("// CrossDesk receipt boundary.","pasteboard.clearContents; pasteboard.setDataForType(data,'public.png');\n// CrossDesk receipt boundary.");
+        let script = format!(
+            "{}\n$.NSFileHandle.fileHandleWithStandardOutput.writeData($(String(crossdeskPublicationRevision)).dataUsingEncoding($.NSUTF8StringEncoding));",
+            script
+        );
+        let receipt = String::from_utf8(isolated(&script, &name, data.get_ref())).unwrap();
+        assert_eq!(receipt, "0");
+        assert_eq!(isolated(READ_BITMAP_SCRIPT, &name, &[]), *data.get_ref());
     }
 }

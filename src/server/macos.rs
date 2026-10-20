@@ -1,3 +1,4 @@
+// CrossDesk file clipboard completion validation: 2026-10-20 (GPL-3.0-only).
 use std::collections::HashSet;
 use std::ffi::c_void;
 use std::net::{TcpListener, TcpStream};

@@ -148,6 +148,13 @@ impl Clipboard {
         if let ClipboardPayload::Bitmap(data) = payload {
             crate::image_transfer::decode_image(data)?;
         }
+        // Precompute the optional bitmap before opening the shared system clipboard.
+        let extra = match payload {
+            ClipboardPayload::Files(files) if files.len() == 1 => {
+                crate::clipboard::image_file_bytes(&files[0])?
+            }
+            _ => None,
+        };
         let owner = self.owner_window()?;
         let _guard = ClipboardGuard::open(owner)?;
         if expected
@@ -163,12 +170,8 @@ impl Clipboard {
             ClipboardPayload::Bitmap(bitmap) => write_bitmap(bitmap),
             ClipboardPayload::Files(files) => {
                 write_files(files)?;
-                if files.len() == 1 {
-                    if let Ok(bytes) = std::fs::read(&files[0]) {
-                        if crate::image_transfer::decode_image(&bytes).is_ok() {
-                            let _ = write_bitmap(&bytes);
-                        }
-                    }
+                if let Some(bytes) = &extra {
+                    let _ = write_bitmap(bytes);
                 }
                 Ok(())
             }
@@ -611,7 +614,26 @@ mod tests {
         assert!(
             matches!(clipboard.read().unwrap(), Some(ClipboardPayload::Files(files)) if files == vec![path.clone()])
         );
+        let pdf = std::env::temp_dir().join(format!("CrossDesk-报告-{}.pdf", std::process::id()));
+        let empty = pdf.with_extension("empty");
+        std::fs::write(&pdf, b"%PDF\0\xff").unwrap();
+        std::fs::write(&empty, b"").unwrap();
+        let ordinary = ClipboardPayload::Files(vec![pdf.clone(), empty.clone()]);
+        let before = clipboard.change_id().unwrap();
+        let published = clipboard
+            .publish_revision_if_current(&ordinary, before)
+            .unwrap()
+            .unwrap();
+        assert_eq!(clipboard.change_id().unwrap(), published);
+        assert_eq!(clipboard.read().unwrap(), Some(ordinary));
+        assert!(
+            !clipboard
+                .write_if_current(&ClipboardPayload::Bitmap(png()), before)
+                .unwrap()
+        );
         clipboard.write(&ClipboardPayload::Text("".into())).unwrap();
         std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(pdf).unwrap();
+        std::fs::remove_file(empty).unwrap();
     }
 }

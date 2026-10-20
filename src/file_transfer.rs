@@ -389,3 +389,6 @@ mod review_regressions {
 
 #[cfg(test)]
 mod tests;
+
+pub mod session;
+pub mod wire;

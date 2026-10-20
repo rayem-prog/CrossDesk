@@ -1,49 +1,60 @@
-# CrossDesk 0.2.0 validation — 2026-10-20
+# CrossDesk 0.3.0 validation — 2026-10-20
 
-## Automated validation
+## Recorded automated evidence
 
-Local environment: Apple Silicon, macOS 27.0.1, Rust 1.98.1.
+Local environment: Apple Silicon, macOS 27.0.1, Rust 1.98.1. Windows remains the keyboard/mouse server and Mac the client; clipboard transfer works in both directions.
 
-- 48 native Mac tests pass. `cargo fmt --check`, Windows target type checking (including tests), and the native Mac release build pass.
-- Native macOS build compiles the C input backend and links Apple frameworks; `CROSSDESK_CHECK_ONLY` is not set.
-- The common transfer tests use real PNG/JPEG bytes, encrypted TCP connections, images larger than 64 KiB, simultaneous transfers in both directions, and interleaved input/heartbeat frames.
-- Tests cover alpha/pixels, Chinese names, exact file bytes, duplicate names, count/size limits, unsafe paths, mixed selections, interrupted transfers, offsets, digests and invalid images.
-- The real clipboard worker is exercised with an in-memory OS boundary over encrypted TCP: startup content is not sent, a remote write is not echoed, the next local image is sent, and the worker stops and joins.
-- macOS adapter tests use named NSPasteboards, leaving the user's general clipboard untouched. They check PNG alpha/pixels, multiple real file URLs, a single file's image representation, stale-write rejection, and safe rejection of file names that collide under macOS Unicode normalization.
-- Windows Rust code and tests are compile-checked for `x86_64-pc-windows-gnu`. Native Windows format conversion, hidden owner-window lifecycle and clipboard publication have tests configured in the MSVC CI job. Native Windows execution has not been run in this session. The clipboard test is ignored in ordinary local test runs and runs explicitly only on the disposable GitHub runner.
-- Windows x64 GNU release executable also links successfully on this Mac using Rust LLD, Homebrew MinGW-w64 14.0.0 (GCC 16.2.0 target libraries), and Zig 0.15.2 for import-library generation. Its PE32+ / AMD64 format and import table were inspected: only Windows system DLLs are imported, with no separate GCC/pthread DLL requirement. This is a cross-build, not a Windows execution test.
-- Existing encrypted pairing, version/CLI validation, input routing, socket blocking-mode and input cleanup regressions remain in the suite.
+- **78 native Mac tests pass**, zero failures. One large acceptance test is ignored in ordinary runs and was run explicitly in release mode.
+- The release acceptance test transfers and verifies **129 MiB / 135,266,304 bytes** through the real encrypted TCP file protocol. The file exceeds the former image batch limit; test verification reads bounded chunks instead of loading it all into memory.
+- All six review regressions now pass: a new local image during remote publication is preserved; identical-content recopy sends again; incomplete file completion is rejected; the next batch preserves previously published files; duplicate basenames do not overwrite; receiving independently rejects oversized manifests.
+- File tests exercise simultaneous bidirectional encrypted transfer, binary PDF/ZIP content, zero-byte files, Chinese names, duplicate names, input and heartbeat frames between chunks, offsets/serials, digest failures, cancellation after disk writes followed by retry, source truncation, symlink rejection, batch/count/size limits, cache quota, timeout cleanup, session-stop wakeup and a retained sender after stop.
+- One common clipboard observer is exercised over encrypted loopback TCP with an in-memory OS boundary: mixed ordinary files publish once, no remote echo, an explicit same-content recopy is sent and published again, incoming files preserve a newer local copy, and newer remote content replaces a queued older batch across image/file kinds.
+- Native Mac tests use **named NSPasteboards**, leaving the user's general clipboard untouched. They cover PNG alpha/pixels, real multiple file URLs, PDF/ZIP/zero-byte files, single-image file representations, stale publication rejection, publication revision receipts, and an identical normal local copy injected before the receipt boundary. A per-publication origin marker distinguishes that copy from the remote write.
+- macOS Unicode normalization is checked both at filesystem collision allocation and native file-URL readback. File identities, rather than path spelling, prevent normalized URLs from triggering clipboard echo; separate files with identical bytes remain distinct.
+- `cargo fmt --check`, `git diff --check`, and Windows target checking including tests pass.
+- Mac ARM64 release build and Windows GNU x64 release link pass. The Windows binary is cross-built on this Mac using Rust LLD, Homebrew MinGW-w64 14.0.0 / GCC 16.2.0 target libraries, and Zig 0.15.2 dlltool. It is a PE32+ AMD64 executable; import-table inspection checks system DLLs only. This is **not Windows runtime validation**.
+- The Windows CI test remains explicitly ignored in ordinary local runs to avoid replacing an interactive user's clipboard. The disposable Windows GitHub runner test now covers ordinary PDF/empty-file CF_HDROP, image formats, owner lifecycle, publication receipts and stale-write guards. It has been compile-checked, but no new native Windows CI run was triggered locally.
+- Prior encrypted pairing, version checks, input routing, emergency release, accepted nonblocking socket recovery and input cleanup regressions remain in the suite.
 
-GitHub publishing is currently unavailable in this session: CLI Git has no push credentials and the connected GitHub integration returned HTTP 403 for writes. No new CI run has been triggered. Once the branch is pushed, status and paired CI builds will appear in [GitHub Actions](https://github.com/rayem-prog/CrossDesk/actions). A successful Mac test or Windows cross-check alone does not establish Windows runtime or physical two-device behavior.
+## Implementation boundaries
 
-## Physical two-device acceptance checklist
+- Version 0.3.0 / protocol v6 is required on both computers; existing pairing key and TCP port 24920 remain usable.
+- Ordinary file limits: 512 MiB per file, 2 GiB / 64 files per batch; cache budget 4 GiB. These are enforced independently by the receiver.
+- A sender waits for a disk-processing acknowledgment per 16 KiB request. The receiver has a bounded queue of eight frames and incremental SHA-256. File buffering remains bounded below the 8 MiB design budget; optional native image representations have their separate existing image decode budget. No total-process RSS limit is claimed.
+- Partial data resides under a private unique batch directory. The clipboard receives no paths until every file is sealed and the batch commits. Completed batches retain those directories once published; failed/unpublished batches are removed by their lifetime guards. A `.part` suffix is not needed for visibility because staging directories are private and unpublished.
+- Clipboard publication uses native revisions and verifies readback identity; native Windows sample is taken under the clipboard lock. Mac publishes fully prepared NSPasteboardItems with a per-write origin marker and captures its receipt inside the same script.
+- Content validation and interruption failures do not publish partial batches. Operating-system publication failures and target-application behavior still require platform/device acceptance.
+- Ordinary files are streamed unchanged. No arbitrary file execution, directories, symbolic links/reparse points, cloud placeholders, cross-device file dragging, text-default sync, or resume is provided. A new explicit copy can retry the same content. No replay occurs on reconnect.
+- Stop-and-wait flow control favors bounded resource use and input responsiveness; throughput depends on round-trip latency. Loopback timing is not a Wi-Fi throughput guarantee.
+- No live CrossDesk service or hardware connection was started during these tests.
 
-Use both 0.2.0 builds with the same private key. Confirm `protocol v5` and `image clipboard: on` in the terminal.
+## Physical two-device acceptance still required
 
-- Copy a screenshot to the Windows clipboard; paste into a Mac image-aware app. Repeat from Mac to Windows. Check size, colors and transparency with a transparent PNG.
-- Copy a PNG and a JPEG with Chinese names in Explorer; paste both into a Finder folder. Repeat in the other direction and compare file bytes/names.
-- Copy a single image file; paste into both a destination folder and an image-aware app. Check the specific chat/editor apps you use.
-- While a large image transfers, move/type on the Mac through CrossDesk. Confirm input remains usable and both terminals stay connected.
-- During an incoming transfer, copy a different local image. Confirm the new local copy is preserved. Copy again at the source if the remote completion was skipped.
-- Copy two different images rapidly after receiving an image; confirm the final local copy sends and there is no repeating echo traffic.
-- Interrupt Wi-Fi during transfer. Confirm no partial image is published, remote input releases, the image worker stops, and reconnect creates one worker. After reconnect, copy again to send.
-- Start either end with `--image-clipboard off`; confirm image sync is off in both directions while keyboard/mouse sharing works.
-- Try a mixed PNG/text-file selection and an oversized image; confirm the selection is skipped without disturbing input or the existing destination clipboard.
-- Stop with Ctrl+C and test emergency input release with Ctrl+Alt+Esc or Scroll Lock on Windows.
+Use both 0.3.0 packages with the same private key. Confirm `protocol v6`, `image clipboard: on`, `file clipboard: on`.
 
-Actual hardware/app compatibility, physical Wi-Fi loss, sleep/wake, Accessibility permission prompts and pointer/IME behavior require these device checks. Automated tests do not claim they have been completed.
+1. Copy PDFs, DOCX/XLSX, ZIP, an empty file and Chinese/accented filenames from Explorer to Finder; repeat in reverse. Compare byte counts and SHA-256 after actual paste.
+2. Copy mixed PNG/PDF selections, duplicate names from different folders, and single image files; check folder paste and intended chat/editor applications.
+3. Copy a large ordinary file in each direction simultaneously while using the remote mouse/keyboard. Record latency compared with idle operation and confirm heartbeat/input remain usable.
+4. During a large send, copy a different local file, bitmap or text. Verify cancellation of unfinished sends and correct final contents. Repeat an identical copy after a skipped publication and confirm retry.
+5. Create a newer local copy while receiving and immediately after publication. Confirm it is preserved and can still send; no repeating echo traffic.
+6. Interrupt Wi-Fi, stop a process, sleep/wake and reconnect repeatedly. Confirm no partial file can be pasted, old senders stop, workers do not accumulate, and input releases.
+7. Leave a completed file copy pending; start a new transfer that fails. Paste the earlier copy. Also test an active Finder/Explorer paste while new batches arrive and before cache cleanup.
+8. Run one side with `--file-clipboard off` and separately `--image-clipboard off`. Confirm independently negotiated behavior, including PNG file transfer while ordinary files are enabled.
+9. Test inaccessible files, excessive size/count, invalid names, disk-full and clipboard-busy conditions. Confirm errors and that keyboard/mouse remain available.
+10. Test Windows emergency release and Ctrl+C on both ends.
 
-## Prior baseline
+Hardware Wi-Fi loss, sleep/wake, real Explorer/Finder paste, clipboard contention, Accessibility prompts and specific application compatibility have not been run in this session. Native Mac adapters and encrypted protocol tests do not establish those results.
 
-Version 0.1.0 was originally built and tested on Windows 11 x64. The baseline includes the fix restoring accepted sockets to blocking mode before the encrypted handshake, with delayed-handshake regression coverage. Cross-device file dragging remains outside the implemented feature.
-
-## Commands recorded for this delivery
+## Reproduction commands
 
 ```sh
 cargo fmt --check
 cargo test --locked --no-default-features
-cargo build --release --locked --no-default-features
+cargo test --release --locked --no-default-features large_file_stream_exceeds_image_batch_limit_without_buffering_the_file -- --ignored --nocapture
 cargo check --locked --no-default-features --target x86_64-pc-windows-gnu --tests
+cargo build --release --locked --no-default-features
 ```
 
-The local Windows link used `CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER` pointing to Rust's `rust-lld`, and target rustflags `-C linker-flavor=ld.lld -C link-self-contained=yes -C dlltool=<Zig dlltool wrapper>`, plus `-L native=<MinGW x64 CRT directory>` and `-L native=<GCC x64 runtime directory>`. The ordinary Windows native build needs none of these cross-build overrides. MinGW target libraries came from the official Homebrew bottle and its SHA-256 was verified before extraction.
+Windows cross link uses `CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=<Rust rust-lld>` and target flags `-C linker-flavor=ld.lld -C link-self-contained=yes -C dlltool=<Zig wrapper>`, with `-L native=` for MinGW x64 CRT and GCC x64 runtime libraries. Native MSVC CI needs none of these overrides. Sources/license notices for the extracted runtime libraries are included under `licenses/toolchain/`.
+
+GitHub write access was unavailable in this session (prior CLI authentication missing; integration writes returned HTTP403). Changes and delivery artifacts are local; no remote branch, PR, release or new CI run is claimed.

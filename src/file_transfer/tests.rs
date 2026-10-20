@@ -53,3 +53,20 @@ fn source_rejects_links_and_detects_truncation_on_the_open_file() {
     assert!(source.unchanged().is_err());
     fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn filesystem_equivalent_unicode_names_are_renamed_without_losing_either_file() {
+    let root = std::env::temp_dir().join(format!("crossdesk-file-unicode-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let mut r = IncomingBundle::new(root.clone());
+    r.start_file("caf\u{e9}.pdf", 1).unwrap();
+    r.write_chunk(b"A").unwrap();
+    r.start_file("cafe\u{301}.pdf", 1).unwrap();
+    r.write_chunk(b"B").unwrap();
+    let files = r.finish().unwrap();
+    assert_eq!(files.len(), 2);
+    assert_eq!(fs::read(&files[0]).unwrap(), b"A");
+    assert_eq!(fs::read(&files[1]).unwrap(), b"B");
+    fs::remove_dir_all(root).unwrap();
+}

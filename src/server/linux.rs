@@ -1,3 +1,4 @@
+// CrossDesk file clipboard completion validation: 2026-10-20 (GPL-3.0-only).
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};

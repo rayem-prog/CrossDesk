@@ -31,6 +31,8 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test --locked --no-default-features native_windows_image_and_file_clipboard_round_trip -- --ignored
       - run: cargo build --release --locked --no-default-features --target ${{ matrix.target }}
+      - name: Verify large streaming file transfer
+        run: cargo test --release --locked --no-default-features large_file_stream_exceeds_image_batch_limit_without_buffering_the_file -- --ignored
       - name: Package binary, launch scripts and corresponding source
         run: python3 scripts/package_input.py --binary target/${{ matrix.target }}/release/${{ matrix.binary }} --platform ${{ matrix.package }} --output dist
       - uses: actions/upload-artifact@v4
