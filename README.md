@@ -79,7 +79,7 @@ chmod +x crossdesk "Start Mac.command" scripts/start-mac-binary.sh
 
 ## 构建、验证与来源
 
-每个预编译包内 `source/` 提供对应的完整项目源码。Mac 源码目录中的 `Build and Start Mac.command` 仍可用于本机编译，需要 Apple Command Line Tools 和 stable Rust。
+每个预编译包内 `source/` 提供对应的完整项目源码，`third-party-source/` 提供该平台构建所用依赖的源码和许可证。Mac 源码目录中的 `Build and Start Mac.command` 仍可用于本机编译，需要 Apple Command Line Tools 和 stable Rust。
 
 ```sh
 cargo fmt --check

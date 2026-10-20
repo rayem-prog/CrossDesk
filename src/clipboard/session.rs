@@ -524,4 +524,38 @@ mod tests {
         mailbox.changed.notify_all();
         worker.join().unwrap();
     }
+
+    #[test]
+    fn worker_exits_when_a_changed_image_cannot_be_sent_to_a_closed_connection() {
+        use crate::secure::SecureStream;
+        use std::net::{Shutdown, TcpListener};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let accept = thread::spawn(move || {
+            SecureStream::accept(listener.accept().unwrap().0, &[45; 32]).unwrap()
+        });
+        let client = SecureStream::connect(&address, &[45; 32]).unwrap();
+        let _peer = accept.join().unwrap();
+        client.shutdown(Shutdown::Both).unwrap();
+        let fake = MemoryClipboard(Arc::new(Mutex::new((
+            1,
+            ClipboardPayload::Bitmap(png(10)),
+            0,
+        ))));
+        let mailbox = Arc::new(Mailbox::default());
+        let worker_mailbox = mailbox.clone();
+        let (done, completion) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            worker_loop(fake, 0, SharedWriter::new(client), worker_mailbox);
+            done.send(()).unwrap();
+        });
+        let stopped = completion.recv_timeout(Duration::from_secs(2));
+        mailbox.stop.store(true, Ordering::Release);
+        mailbox.changed.notify_all();
+        worker.join().unwrap();
+        assert!(
+            stopped.is_ok(),
+            "clipboard worker leaked after a transport failure"
+        );
+    }
 }

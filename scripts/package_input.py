@@ -1,5 +1,6 @@
 """Package one native binary with launch scripts and its corresponding project source."""
 import argparse
+import json
 from pathlib import Path
 import subprocess
 import tomllib
@@ -19,6 +20,13 @@ args.output.mkdir(parents=True, exist_ok=True)
 archive_path = args.output / f"{name}.zip"
 source_paths = subprocess.check_output(["git", "ls-files", "-z"], cwd=root).decode().split("\0")
 commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root).decode().strip()
+target = "aarch64-apple-darwin" if args.platform == "Mac-ARM64" else "x86_64-pc-windows-gnu"
+if args.platform == "Windows-x64" and "msvc" in str(args.binary):
+    target = "x86_64-pc-windows-msvc"
+metadata = json.loads(subprocess.check_output([
+    "cargo", "metadata", "--format-version", "1", "--locked", "--no-default-features",
+    "--filter-platform", target,
+], cwd=root))
 
 
 def add(archive, path, relative, executable=False):
@@ -50,6 +58,18 @@ with zipfile.ZipFile(archive_path, "w") as archive:
         if path.is_file():
             add(archive, path, f"source/{relative}")
     archive.writestr(f"{name}/COMMIT.txt", f"CrossDesk {version}\nSource commit: {commit}\n")
+    dependencies = [f"Source and license files for dependencies used by the {target} binary:\n"]
+    for package in sorted(metadata["packages"], key=lambda p: (p["name"], p["version"])):
+        if package["source"] is None:
+            continue
+        dependency = f'{package["name"]}-{package["version"]}'
+        directory = Path(package["manifest_path"]).parent
+        dependencies.append(f'{dependency}: {package["license"] or "see license file"}; {package["source"]}')
+        for path in sorted(directory.rglob("*")):
+            if path.is_file() and path.name not in (".cargo-ok", ".cargo-vcs-info.json"):
+                relative = path.relative_to(directory).as_posix()
+                add(archive, path, f"third-party-source/{dependency}/{relative}")
+    archive.writestr(f"{name}/THIRD_PARTY_SOURCES.txt", "\n".join(dependencies) + "\n")
 with zipfile.ZipFile(archive_path) as archive:
     assert archive.testzip() is None
     assert not any(n.endswith(".key") for n in archive.namelist())

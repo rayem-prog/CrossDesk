@@ -4,15 +4,16 @@
 
 Local environment: Apple Silicon, macOS 27.0.1, Rust 1.98.1.
 
+- 47 native Mac tests pass. `cargo fmt --check`, Windows target type checking (including tests), and the native Mac release build pass.
 - Native macOS build compiles the C input backend and links Apple frameworks; `CROSSDESK_CHECK_ONLY` is not set.
 - The common transfer tests use real PNG/JPEG bytes, encrypted TCP connections, images larger than 64 KiB, simultaneous transfers in both directions, and interleaved input/heartbeat frames.
 - Tests cover alpha/pixels, Chinese names, exact file bytes, duplicate names, count/size limits, unsafe paths, mixed selections, interrupted transfers, offsets, digests and invalid images.
 - The real clipboard worker is exercised with an in-memory OS boundary over encrypted TCP: startup content is not sent, a remote write is not echoed, the next local image is sent, and the worker stops and joins.
 - macOS adapter tests use named NSPasteboards, leaving the user's general clipboard untouched. They check PNG alpha/pixels, multiple real file URLs, a single file's image representation, and stale-write rejection.
-- Windows Rust code and tests are compile-checked for `x86_64-pc-windows-gnu`. Native Windows format conversion, hidden owner-window lifecycle and clipboard publication are tested by the MSVC CI job. The clipboard test is ignored in ordinary local test runs and runs explicitly only on the disposable GitHub runner.
+- Windows Rust code and tests are compile-checked for `x86_64-pc-windows-gnu`. Native Windows format conversion, hidden owner-window lifecycle and clipboard publication have tests configured in the MSVC CI job. Native Windows execution has not been run in this session. The clipboard test is ignored in ordinary local test runs and runs explicitly only on the disposable GitHub runner.
 - Existing encrypted pairing, version/CLI validation, input routing, socket blocking-mode and input cleanup regressions remain in the suite.
 
-Exact CI status and downloadable paired builds are available in [GitHub Actions](https://github.com/rayem-prog/CrossDesk/actions). A successful Mac test or Windows cross-check alone does not establish Windows runtime or physical two-device behavior.
+GitHub publishing is currently unavailable in this session: CLI Git has no push credentials and the connected GitHub integration returned HTTP 403 for writes. No new CI run has been triggered. Once the branch is pushed, status and paired CI builds will appear in [GitHub Actions](https://github.com/rayem-prog/CrossDesk/actions). A successful Mac test or Windows cross-check alone does not establish Windows runtime or physical two-device behavior.
 
 ## Physical two-device acceptance checklist
 
