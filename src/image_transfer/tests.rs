@@ -1,3 +1,4 @@
+// CrossDesk image clipboard changes: 2026-10-20 (GPL-3.0-only).
 use super::*;
 use crate::protocol::{ClipboardPayload, Frame, FrameKind};
 use std::io::Cursor;

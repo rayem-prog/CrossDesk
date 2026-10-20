@@ -1,3 +1,4 @@
+// CrossDesk image clipboard changes: 2026-10-20 (GPL-3.0-only).
 use crate::secure::SecureStream;
 use std::net::Shutdown;
 use std::sync::atomic::{AtomicBool, Ordering};

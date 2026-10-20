@@ -1,3 +1,4 @@
+// CrossDesk image clipboard changes: 2026-10-20 (GPL-3.0-only).
 use std::io::Cursor;
 use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::OsStrExt;

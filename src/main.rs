@@ -1,3 +1,4 @@
+// CrossDesk image clipboard changes: 2026-10-20 (GPL-3.0-only).
 #![allow(dead_code)]
 mod client;
 mod clipboard;

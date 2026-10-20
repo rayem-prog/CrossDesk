@@ -1,3 +1,4 @@
+// CrossDesk image clipboard changes: 2026-10-20 (GPL-3.0-only).
 use crate::protocol::ClipboardPayload;
 
 #[cfg(target_os = "linux")]

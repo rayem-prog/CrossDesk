@@ -57,6 +57,9 @@ with zipfile.ZipFile(archive_path, "w") as archive:
             raise RuntimeError("private pairing material must not be tracked or packaged")
         if path.is_file():
             add(archive, path, f"source/{relative}")
+    for path in sorted((root / "licenses").rglob("*")):
+        if path.is_file():
+            add(archive, path, path.relative_to(root).as_posix())
     archive.writestr(f"{name}/COMMIT.txt", f"CrossDesk {version}\nSource commit: {commit}\n")
     dependencies = [f"Source and license files for dependencies used by the {target} binary:\n"]
     for package in sorted(metadata["packages"], key=lambda p: (p["name"], p["version"])):

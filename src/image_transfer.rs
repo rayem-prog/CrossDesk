@@ -1,3 +1,4 @@
+// CrossDesk image clipboard changes: 2026-10-20 (GPL-3.0-only).
 //! Bounded image clipboard transfer over the existing encrypted transport.
 
 use crate::protocol::{CHUNK_SIZE, ClipboardPayload, Frame, FrameKind};

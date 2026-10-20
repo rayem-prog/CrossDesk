@@ -1,3 +1,4 @@
+// CrossDesk image clipboard changes: 2026-10-20 (GPL-3.0-only).
 use super::{Clipboard, ClipboardApi};
 use crate::image_transfer::{self, Incoming, Transfer};
 use crate::protocol::{ClipboardPayload, Frame, FrameKind};

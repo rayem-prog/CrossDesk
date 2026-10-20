@@ -1,3 +1,4 @@
+// CrossDesk image clipboard changes: 2026-10-20 (GPL-3.0-only).
 use std::ffi::{c_char, c_void};
 use std::io::Write;
 use std::path::PathBuf;
