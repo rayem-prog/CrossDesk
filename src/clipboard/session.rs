@@ -175,9 +175,7 @@ fn worker_loop<C: ClipboardApi>(
                         }
                         match Transfer::from_clipboard(&payload).and_then(|transfer| {
                             let fingerprint = transfer.fingerprint()?;
-                            if !state.should_send(fingerprint) {
-                                return Ok(());
-                            }
+                            // A changed native revision is a new copy, even if its content is identical.
                             let count = transfer.images.len();
                             let bytes: usize = transfer.images.iter().map(|v| v.data.len()).sum();
                             // Do not send an older copy that changed while image conversion ran.
@@ -263,12 +261,12 @@ fn apply_delivery<C: ClipboardApi>(
             remove_unpublished(&payload, root);
             return Ok(None);
         }
-        match clipboard.write_if_current(&payload, current) {
-            Ok(true) => {
-                result = Some(Ok(()));
+        match clipboard.publish_revision_if_current(&payload, current) {
+            Ok(Some(published)) => {
+                result = Some(Ok(published));
                 break;
             }
-            Ok(false) => {
+            Ok(None) => {
                 remove_unpublished(&payload, root);
                 return Ok(None);
             }
@@ -281,21 +279,24 @@ fn apply_delivery<C: ClipboardApi>(
             break;
         }
     }
-    if let Err(error) = result.unwrap() {
-        remove_unpublished(&payload, root);
-        return Err(error);
-    }
-    let published_revision = clipboard.change_id()?;
-    state.note_remote(fingerprint);
-    if let Ok(Some(readback)) = clipboard.read() {
-        if clipboard.change_id()? == published_revision {
-            if let Ok(transfer) = Transfer::from_clipboard(&readback) {
-                if let Ok(fingerprint) = transfer.fingerprint() {
-                    state.remote.push(fingerprint);
-                }
-            }
+    let published_revision = match result.unwrap() {
+        Ok(revision) => revision,
+        Err(error) => {
+            remove_unpublished(&payload, root);
+            return Err(error);
         }
+    };
+    // Never advance observation to a newer local copy or whitelist arbitrary readback.
+    // Published file caches are retained even if another app immediately copies again.
+    if clipboard.change_id()? != published_revision {
+        return Ok(None);
     }
+    match clipboard.read() {
+        Ok(Some(readback))
+            if readback == payload && clipboard.change_id()? == published_revision => {}
+        _ => return Ok(None),
+    }
+    state.note_remote(fingerprint);
     eprintln!("image clipboard received: {count} image(s); ready to paste");
     Ok(Some(published_revision))
 }
@@ -557,6 +558,144 @@ mod tests {
         assert!(
             stopped.is_ok(),
             "clipboard worker leaked after a transport failure"
+        );
+    }
+}
+
+#[cfg(test)]
+mod review_regressions {
+    use super::*;
+    use crate::secure::SecureStream;
+    use std::net::TcpListener;
+    use std::sync::atomic::AtomicUsize;
+    fn png(red: u8) -> Vec<u8> {
+        let image = image::RgbaImage::from_raw(1, 1, vec![red, 2, 3, 127]).unwrap();
+        let mut out = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+    struct Memory {
+        value: Arc<Mutex<(u64, ClipboardPayload)>>,
+        reads: Arc<AtomicUsize>,
+    }
+    impl ClipboardApi for Memory {
+        fn change_id(&self) -> io::Result<u64> {
+            Ok(self.value.lock().unwrap().0)
+        }
+        fn read(&mut self) -> io::Result<Option<ClipboardPayload>> {
+            self.reads.fetch_add(1, Ordering::AcqRel);
+            Ok(Some(self.value.lock().unwrap().1.clone()))
+        }
+        fn write(&mut self, payload: &ClipboardPayload) -> io::Result<()> {
+            let mut state = self.value.lock().unwrap();
+            state.0 += 1;
+            state.1 = payload.clone();
+            Ok(())
+        }
+    }
+    #[test]
+    fn review_explicit_recopy_of_same_image_must_send_again() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let accept = thread::spawn(move || {
+            SecureStream::accept(listener.accept().unwrap().0, &[89; 32]).unwrap()
+        });
+        let client = SecureStream::connect(&address, &[89; 32]).unwrap();
+        let mut peer = accept.join().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let value = Arc::new(Mutex::new((0, ClipboardPayload::Bitmap(png(1)))));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mailbox = Arc::new(Mailbox::default());
+        let fake = Memory {
+            value: value.clone(),
+            reads: reads.clone(),
+        };
+        let worker_mailbox = mailbox.clone();
+        let worker =
+            thread::spawn(move || worker_loop(fake, 0, SharedWriter::new(client), worker_mailbox));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while reads.load(Ordering::Acquire) == 0 && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        {
+            let mut s = value.lock().unwrap();
+            s.0 = 1;
+            s.1 = ClipboardPayload::Bitmap(png(7));
+        }
+        mailbox.changed.notify_all();
+        let mut incoming = Incoming::default();
+        loop {
+            if incoming
+                .receive(crate::protocol::read_frame(&mut peer).unwrap())
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+        }
+        // The peer may reject publishing because a newer local copy exists. No outcome ACK is sent.
+        {
+            value.lock().unwrap().0 = 2;
+        }
+        mailbox.changed.notify_all();
+        peer.set_read_timeout(Some(Duration::from_millis(650)))
+            .unwrap();
+        let second = crate::protocol::read_frame(&mut peer);
+        mailbox.stop.store(true, Ordering::Release);
+        mailbox.changed.notify_all();
+        worker.join().unwrap();
+        assert!(
+            second.is_ok(),
+            "explicit same-content recopy was suppressed: {second:?}"
+        );
+    }
+    struct CopyDuringPublication {
+        revision: u64,
+        local: ClipboardPayload,
+    }
+    impl ClipboardApi for CopyDuringPublication {
+        fn change_id(&self) -> io::Result<u64> {
+            Ok(self.revision)
+        }
+        fn read(&mut self) -> io::Result<Option<ClipboardPayload>> {
+            Ok(Some(self.local.clone()))
+        }
+        fn write(&mut self, _: &ClipboardPayload) -> io::Result<()> {
+            unreachable!()
+        }
+        fn write_if_current(&mut self, _: &ClipboardPayload, expected: u64) -> io::Result<bool> {
+            assert_eq!(self.revision, expected);
+            // Remote write releases native clipboard ownership at revision 1.
+            self.revision += 1;
+            // Another app immediately copies a DIFFERENT local image before this call returns.
+            self.revision += 1;
+            Ok(true)
+        }
+    }
+    #[test]
+    fn review_local_copy_after_publication_must_not_be_marked_as_remote_echo() {
+        let local = ClipboardPayload::Bitmap(png(9));
+        let local_fingerprint = Transfer::from_clipboard(&local)
+            .unwrap()
+            .fingerprint()
+            .unwrap();
+        let mut clipboard = CopyDuringPublication { revision: 0, local };
+        let delivery = Delivery {
+            revision: 0,
+            transfer: Transfer::from_clipboard(&ClipboardPayload::Bitmap(png(8))).unwrap(),
+        };
+        let mut state = SyncState::default();
+        let recorded_revision = apply_delivery(
+            &mut clipboard,
+            delivery,
+            &std::env::temp_dir(),
+            None,
+            &mut state,
+        )
+        .unwrap();
+        assert!(
+            state.should_send(local_fingerprint),
+            "a distinct new local copy is registered as remote echo; revision={recorded_revision:?}"
         );
     }
 }

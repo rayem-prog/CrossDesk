@@ -25,6 +25,18 @@ pub trait ClipboardApi {
     }
     fn read(&mut self) -> std::io::Result<Option<ClipboardPayload>>;
     fn write(&mut self, payload: &ClipboardPayload) -> std::io::Result<()>;
+    /// Returns the native revision of this publication, before releasing ownership.
+    fn publish_revision_if_current(
+        &mut self,
+        payload: &ClipboardPayload,
+        expected: u64,
+    ) -> std::io::Result<Option<u64>> {
+        if self.write_if_current(payload, expected)? {
+            Ok(Some(self.change_id()?))
+        } else {
+            Ok(None)
+        }
+    }
     fn write_if_current(
         &mut self,
         payload: &ClipboardPayload,

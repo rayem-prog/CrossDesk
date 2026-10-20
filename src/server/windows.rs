@@ -333,7 +333,14 @@ fn spawn_inbound_reader(
                     }
                 }
                 FrameKind::DragEnd => {
-                    let payload = ClipboardPayload::Files(incoming_files.finish());
+                    let files = match incoming_files.finish() {
+                        Ok(files) => files,
+                        Err(error) => {
+                            eprintln!("file batch rejected: {error}");
+                            continue;
+                        }
+                    };
+                    let payload = ClipboardPayload::Files(files);
                     eprintln!("received clipboard {}", clipboard_summary(&payload));
                     if let Err(e) = clipboard.write(&payload) {
                         eprintln!("file clipboard write failed: {e}");

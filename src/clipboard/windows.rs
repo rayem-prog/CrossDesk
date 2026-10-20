@@ -76,6 +76,13 @@ impl Drop for Clipboard {
 }
 
 impl ClipboardApi for Clipboard {
+    fn publish_revision_if_current(
+        &mut self,
+        payload: &ClipboardPayload,
+        expected: u64,
+    ) -> std::io::Result<Option<u64>> {
+        self.publish(payload, Some(expected))
+    }
     fn change_id(&self) -> std::io::Result<u64> {
         Ok(unsafe { GetClipboardSequenceNumber() } as u64)
     }
@@ -128,6 +135,7 @@ impl ClipboardApi for Clipboard {
         expected: u64,
     ) -> std::io::Result<bool> {
         self.publish(payload, Some(expected))
+            .map(|revision| revision.is_some())
     }
 }
 
@@ -136,7 +144,7 @@ impl Clipboard {
         &mut self,
         payload: &ClipboardPayload,
         expected: Option<u64>,
-    ) -> std::io::Result<bool> {
+    ) -> std::io::Result<Option<u64>> {
         if let ClipboardPayload::Bitmap(data) = payload {
             crate::image_transfer::decode_image(data)?;
         }
@@ -145,7 +153,7 @@ impl Clipboard {
         if expected
             .is_some_and(|revision| unsafe { GetClipboardSequenceNumber() } as u64 != revision)
         {
-            return Ok(false);
+            return Ok(None);
         }
         if unsafe { EmptyClipboard() } == 0 {
             return Err(last_os_error("EmptyClipboard failed"));
@@ -165,7 +173,10 @@ impl Clipboard {
                 Ok(())
             }
         };
-        result.map(|_| true)
+        // Sample while the clipboard remains locked; later user copies have a different revision.
+        result
+            .map(|_| unsafe { GetClipboardSequenceNumber() } as u64)
+            .map(Some)
     }
 }
 

@@ -140,7 +140,7 @@ fn run_session(server: &str, key: &[u8; 32]) -> std::io::Result<()> {
                 incoming_files.write_chunk(&frame.payload)?;
             }
             FrameKind::DragEnd => {
-                let files = incoming_files.finish();
+                let files = incoming_files.finish()?;
                 let payload = ClipboardPayload::Files(files);
                 eprintln!("received clipboard {}", clipboard_summary(&payload));
                 if let Err(e) = clipboard.write(&payload) {

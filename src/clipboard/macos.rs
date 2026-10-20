@@ -55,11 +55,11 @@ impl ClipboardApi for Clipboard {
             ClipboardPayload::Files(files) => write_files(files),
         }
     }
-    fn write_if_current(
+    fn publish_revision_if_current(
         &mut self,
         payload: &ClipboardPayload,
         expected: u64,
-    ) -> std::io::Result<bool> {
+    ) -> std::io::Result<Option<u64>> {
         let (script, input) = match payload {
             ClipboardPayload::Bitmap(data) => {
                 (WRITE_BITMAP_SCRIPT, crate::image_transfer::png_bytes(data)?)
@@ -75,24 +75,39 @@ impl ClipboardApi for Clipboard {
             ),
             _ => {
                 if self.change_id()? != expected {
-                    return Ok(false);
+                    return Ok(None);
                 }
                 self.write(payload)?;
-                return Ok(true);
+                return self.change_id().map(Some);
             }
         };
-        let script = guarded_write_script(script, expected);
+        let script = format!(
+            "{}\n$.NSFileHandle.fileHandleWithStandardOutput.writeData($(String(Number($.NSPasteboard.generalPasteboard.changeCount))).dataUsingEncoding($.NSUTF8StringEncoding));",
+            guarded_write_script(script, expected)
+        );
         match write_filter("osascript", &["-l", "JavaScript", "-e", &script], &input) {
-            Ok(_) => Ok(true),
+            Ok(output) => String::from_utf8_lossy(&output)
+                .trim()
+                .parse::<u64>()
+                .map(Some)
+                .map_err(|_| std::io::Error::other("missing clipboard publication revision")),
             Err(error)
                 if error
                     .to_string()
                     .contains("clipboard changed before publish") =>
             {
-                Ok(false)
+                Ok(None)
             }
             Err(error) => Err(error),
         }
+    }
+    fn write_if_current(
+        &mut self,
+        payload: &ClipboardPayload,
+        expected: u64,
+    ) -> std::io::Result<bool> {
+        self.publish_revision_if_current(payload, expected)
+            .map(|revision| revision.is_some())
     }
 }
 
