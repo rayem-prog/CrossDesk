@@ -1,6 +1,6 @@
 [package]
 name = "crossdesk"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
 license = "GPL-3.0-only"
 
@@ -16,16 +16,16 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 snow = { version = "0.10", default-features = false, features = ["use-chacha20poly1305", "use-sha2", "use-curve25519", "use-getrandom"] }
 getrandom = "0.2"
 ctrlc = { version = "3.4", features = ["termination"] }
+image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }
+sha2 = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

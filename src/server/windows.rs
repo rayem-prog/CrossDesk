@@ -1,3 +1,4 @@
+// CrossDesk image clipboard changes: 2026-10-20 (GPL-3.0-only).
 use crate::desktop::{DesktopLayout, MonitorRect};
 use crate::secure::SecureStream;
 use std::collections::HashSet;
@@ -42,6 +43,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::{Edge, ServerConfig};
+use crate::clipboard::session::ClipboardSession;
 use crate::clipboard::{Clipboard, ClipboardApi};
 use crate::file_transfer;
 use crate::platform::{ConnectionProfile, Platform};
@@ -115,10 +117,17 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
         let hello = writer.write(Frame::new(FrameKind::Hello, protocol::hello_payload()));
         let peer = hello.and_then(|_| read_client_hello(&mut stream));
         match peer {
-            Ok((remote_size, platform)) => {
-                if let Err(error) =
-                    run_session(&config, stream, address, writer, remote_size, platform)
-                {
+            Ok((remote_size, platform, images_enabled, files_enabled)) => {
+                if let Err(error) = run_session(
+                    &config,
+                    stream,
+                    address,
+                    writer,
+                    remote_size,
+                    platform,
+                    images_enabled,
+                    files_enabled,
+                ) {
                     eprintln!("Session ended: {error}");
                 }
                 if !crate::shutdown::requested() {
@@ -138,6 +147,8 @@ fn run_session(
     writer: SharedWriter,
     remote_size: (i32, i32),
     client_platform: Platform,
+    images_enabled: bool,
+    files_enabled: bool,
 ) -> std::io::Result<()> {
     let stop_stream = stream.try_clone()?;
     let remote_profile = ConnectionProfile::local_server(client_platform);
@@ -173,7 +184,13 @@ fn run_session(
     let stop_window = raw_input.hwnd as usize;
     STOP_WINDOW.store(stop_window, Ordering::Release);
     CONNECTION_ALIVE.store(true, Ordering::Release);
-    let reader = spawn_inbound_reader(stream, Arc::clone(&clipboard_state));
+    let reader = spawn_inbound_reader(
+        stream,
+        Arc::clone(&clipboard_state),
+        writer.clone(),
+        images_enabled,
+        files_enabled,
+    );
     let ping_writer = writer.clone();
     let heartbeat = thread::spawn(move || {
         while CONNECTION_ALIVE.load(Ordering::Acquire) {
@@ -192,7 +209,9 @@ fn run_session(
             }
         }
     });
-    spawn_clipboard_watcher(writer, clipboard_state);
+    if !images_enabled && !files_enabled {
+        spawn_clipboard_watcher(writer, clipboard_state);
+    }
     crate::shutdown::spawn_gui_stop_watcher(move || unsafe {
         PostMessageW(stop_window as HWND, WM_DESKBRIDGE_STOP, 0, 0);
     });
@@ -220,7 +239,9 @@ fn run_session(
     Ok(())
 }
 
-fn read_client_hello(stream: &mut SecureStream) -> std::io::Result<((i32, i32), Platform)> {
+fn read_client_hello(
+    stream: &mut SecureStream,
+) -> std::io::Result<((i32, i32), Platform, bool, bool)> {
     let frame = protocol::read_frame(stream)?;
     if frame.kind != FrameKind::Hello {
         return Err(std::io::Error::new(
@@ -238,14 +259,30 @@ fn read_client_hello(stream: &mut SecureStream) -> std::io::Result<((i32, i32), 
             "invalid remote screen dimensions",
         ));
     }
-    Ok(((width as i32, height as i32), hello.platform))
+    Ok((
+        (width as i32, height as i32),
+        hello.platform,
+        hello.image_clipboard && crate::transport::image_clipboard_enabled(),
+        hello.file_clipboard && crate::transport::file_clipboard_enabled(),
+    ))
 }
 
 fn spawn_inbound_reader(
     mut stream: SecureStream,
     clipboard_state: Arc<Mutex<ClipboardSyncState>>,
+    writer: SharedWriter,
+    images_enabled: bool,
+    files_enabled: bool,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
+        let mut images = match ClipboardSession::start(writer, images_enabled, files_enabled) {
+            Ok(images) => images,
+            Err(error) => {
+                eprintln!("image clipboard unavailable: {error}");
+                connection_lost();
+                return;
+            }
+        };
         let mut clipboard = match Clipboard::new() {
             Ok(clipboard) => clipboard,
             Err(e) => {
@@ -266,6 +303,12 @@ fn spawn_inbound_reader(
                     break;
                 }
             };
+            if ClipboardSession::handles(frame.kind) {
+                if let Err(error) = images.receive(frame) {
+                    eprintln!("clipboard transfer rejected: {error}");
+                }
+                continue;
+            }
             if !crate::transport::clipboard_enabled() && frame.kind != FrameKind::Pong {
                 eprintln!("Unexpected client frame in input-only mode");
                 connection_lost();
@@ -297,7 +340,14 @@ fn spawn_inbound_reader(
                     }
                 }
                 FrameKind::DragEnd => {
-                    let payload = ClipboardPayload::Files(incoming_files.finish());
+                    let files = match incoming_files.finish() {
+                        Ok(files) => files,
+                        Err(error) => {
+                            eprintln!("file batch rejected: {error}");
+                            continue;
+                        }
+                    };
+                    let payload = ClipboardPayload::Files(files);
                     eprintln!("received clipboard {}", clipboard_summary(&payload));
                     if let Err(e) = clipboard.write(&payload) {
                         eprintln!("file clipboard write failed: {e}");

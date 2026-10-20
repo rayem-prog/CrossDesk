@@ -1,9 +1,10 @@
+// CrossDesk image clipboard changes: 2026-10-20 (GPL-3.0-only).
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use crate::platform::Platform;
 
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 6;
 pub const CHUNK_SIZE: usize = 16 * 1024;
 pub const MAX_FRAME_PAYLOAD_SIZE: usize = 64 * 1024;
 
@@ -22,6 +23,16 @@ pub enum FrameKind {
     Error = 10,
     Ping = 11,
     Pong = 12,
+    ImageStart = 13,
+    ImageChunk = 14,
+    ImageEnd = 15,
+    FileOffer = 16,
+    FileData = 17,
+    FileSeal = 18,
+    FileCommit = 19,
+    FileAck = 20,
+    FileCancel = 21,
+    TransferResult = 22,
 }
 
 impl FrameKind {
@@ -39,6 +50,16 @@ impl FrameKind {
             10 => Ok(Self::Error),
             11 => Ok(Self::Ping),
             12 => Ok(Self::Pong),
+            13 => Ok(Self::ImageStart),
+            14 => Ok(Self::ImageChunk),
+            15 => Ok(Self::ImageEnd),
+            16 => Ok(Self::FileOffer),
+            17 => Ok(Self::FileData),
+            18 => Ok(Self::FileSeal),
+            19 => Ok(Self::FileCommit),
+            20 => Ok(Self::FileAck),
+            21 => Ok(Self::FileCancel),
+            22 => Ok(Self::TransferResult),
             _ => Err(invalid("unknown frame kind")),
         }
     }
@@ -94,6 +115,8 @@ pub struct Hello {
     pub platform: Platform,
     pub screen_width: Option<u32>,
     pub screen_height: Option<u32>,
+    pub image_clipboard: bool,
+    pub file_clipboard: bool,
 }
 
 pub fn read_frame(reader: &mut impl Read) -> std::io::Result<Frame> {
@@ -121,6 +144,11 @@ pub fn write_frame(writer: &mut impl Write, frame: &Frame) -> std::io::Result<()
 }
 
 pub fn write_frame_unflushed(writer: &mut impl Write, frame: &Frame) -> std::io::Result<()> {
+    if frame.payload.len() > MAX_FRAME_PAYLOAD_SIZE {
+        return Err(invalid(
+            "frame payload exceeds 64 KiB; use chunked transfer",
+        ));
+    }
     writer.write_all(&[frame.kind as u8])?;
     writer.write_all(&(frame.payload.len() as u64).to_be_bytes())?;
     writer.write_all(&frame.payload)
@@ -129,6 +157,10 @@ pub fn write_frame_unflushed(writer: &mut impl Write, frame: &Frame) -> std::io:
 pub fn hello_payload() -> Vec<u8> {
     let mut out = VERSION.to_be_bytes().to_vec();
     out.push(Platform::local().as_byte());
+    out.push(
+        u8::from(crate::transport::image_clipboard_enabled())
+            | (u8::from(crate::transport::file_clipboard_enabled()) << 1),
+    );
     out
 }
 
@@ -149,10 +181,22 @@ pub fn decode_hello(payload: &[u8]) -> std::io::Result<Hello> {
         .copied()
         .map(Platform::from_byte)
         .unwrap_or(Platform::Unknown);
-    let (screen_width, screen_height) = if payload.len() >= 11 {
+    let dimensions_offset = if version >= 5 { 4 } else { 3 };
+    if version == VERSION && !matches!(payload.len(), 4 | 12) {
+        return Err(invalid("invalid v6 hello length"));
+    }
+    let (screen_width, screen_height) = if payload.len() >= dimensions_offset + 8 {
         (
-            Some(u32::from_be_bytes(payload[3..7].try_into().unwrap())),
-            Some(u32::from_be_bytes(payload[7..11].try_into().unwrap())),
+            Some(u32::from_be_bytes(
+                payload[dimensions_offset..dimensions_offset + 4]
+                    .try_into()
+                    .unwrap(),
+            )),
+            Some(u32::from_be_bytes(
+                payload[dimensions_offset + 4..dimensions_offset + 8]
+                    .try_into()
+                    .unwrap(),
+            )),
         )
     } else if payload.len() >= 10 {
         (
@@ -167,6 +211,8 @@ pub fn decode_hello(payload: &[u8]) -> std::io::Result<Hello> {
         platform,
         screen_width,
         screen_height,
+        image_clipboard: version >= 5 && payload.get(3).is_some_and(|v| v & 1 != 0),
+        file_clipboard: version >= 6 && payload.get(3).is_some_and(|v| v & 2 != 0),
     })
 }
 
@@ -175,7 +221,7 @@ pub fn validate_version(hello: Hello) -> std::io::Result<()> {
         Ok(())
     } else {
         Err(invalid_owned(format!(
-            "protocol version mismatch: peer={}, local={VERSION}",
+            "protocol version mismatch: peer={}, local={VERSION}; update CrossDesk on BOTH machines",
             hello.version
         )))
     }
@@ -393,6 +439,22 @@ fn invalid_owned(message: String) -> std::io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn v6_hello_decodes_capabilities_without_shifting_screen_dimensions() {
+        let hello = decode_hello(&[0, 6, 2, 3, 0, 0, 5, 232, 0, 0, 3, 214]).unwrap();
+        assert!(hello.image_clipboard && hello.file_clipboard);
+        assert_eq!(hello.screen_width, Some(1512));
+        assert_eq!(hello.screen_height, Some(982));
+        validate_version(hello).unwrap();
+    }
+
+    #[test]
+    fn image_frames_can_be_read_without_raising_the_frame_limit() {
+        for kind in [13, 14, 15] {
+            let bytes = [kind, 0, 0, 0, 0, 0, 0, 0, 0];
+            assert!(read_frame(&mut &bytes[..]).is_ok());
+        }
+    }
 
     #[test]
     fn input_events_round_trip() {
@@ -432,6 +494,8 @@ mod tests {
                 platform: Platform::Unknown,
                 screen_width: None,
                 screen_height: None,
+                image_clipboard: false,
+                file_clipboard: false,
             })
             .is_err()
         );

@@ -1,3 +1,4 @@
+// CrossDesk image clipboard changes: 2026-10-20 (GPL-3.0-only).
 use crate::secure::SecureStream;
 use std::io::Write;
 use std::sync::{Arc, Condvar, Mutex};
@@ -33,7 +34,15 @@ impl SharedWriter {
     }
 
     pub fn write(&self, frame: Frame) -> std::io::Result<()> {
-        let input_priority = frame.kind == FrameKind::Input;
+        let input_priority = matches!(
+            frame.kind,
+            FrameKind::Input
+                | FrameKind::Ping
+                | FrameKind::Pong
+                | FrameKind::FileAck
+                | FrameKind::FileCancel
+                | FrameKind::TransferResult
+        );
         let _permit = self.inner.acquire(input_priority);
         let mut encoded = Vec::with_capacity(9 + frame.payload.len());
         protocol::write_frame_unflushed(&mut encoded, &frame)?;
@@ -79,6 +88,11 @@ impl Drop for WritePermit<'_> {
 
 pub fn clipboard_enabled() -> bool {
     std::env::var("CROSSDESK_ENABLE_CLIPBOARD").is_ok_and(|v| v == "1")
+}
+
+pub fn image_clipboard_enabled() -> bool {
+    cfg!(any(windows, target_os = "macos"))
+        && std::env::var("CROSSDESK_IMAGE_CLIPBOARD").map_or(true, |v| v != "off")
 }
 
 #[cfg(test)]
@@ -132,4 +146,9 @@ mod tests {
         }
         peer.join().unwrap();
     }
+}
+
+pub fn file_clipboard_enabled() -> bool {
+    cfg!(any(windows, target_os = "macos"))
+        && std::env::var("CROSSDESK_FILE_CLIPBOARD").map_or(true, |v| v != "off")
 }

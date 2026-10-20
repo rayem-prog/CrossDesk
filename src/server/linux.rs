@@ -1,3 +1,4 @@
+// CrossDesk file clipboard completion validation: 2026-10-20 (GPL-3.0-only).
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
@@ -1006,7 +1007,11 @@ fn spawn_inbound_reader(
                     }
                 }
                 FrameKind::DragEnd => {
-                    let payload = ClipboardPayload::Files(incoming_files.finish());
+                    let files = match incoming_files.finish() {
+                        Ok(files) => files,
+                        Err(error) => { eprintln!("file batch rejected: {error}"); continue; }
+                    };
+                    let payload = ClipboardPayload::Files(files);
                     eprintln!("received clipboard {}", clipboard_summary(&payload));
                     if let Err(e) = clipboard.write(&payload) {
                         eprintln!("file clipboard write failed: {e}");
