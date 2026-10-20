@@ -4,7 +4,7 @@ use crate::protocol::{CHUNK_SIZE, ClipboardPayload, Frame, FrameKind};
 use image::{DynamicImage, ImageFormat, ImageReader, Limits};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::io::{self, Cursor, Read};
+use std::io::{self, Cursor, Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -237,12 +237,14 @@ impl Transfer {
             let mut files = Vec::new();
             for image in self.images {
                 let path = directory.join(image.name);
-                std::fs::write(&path, image.data)?;
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create_new(true);
                 #[cfg(unix)]
                 {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
                 }
+                options.open(&path)?.write_all(&image.data)?;
                 files.push(path);
             }
             Ok(ClipboardPayload::Files(files))

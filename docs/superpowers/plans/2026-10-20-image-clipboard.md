@@ -90,8 +90,8 @@ Pixel fixture expectations use literal RGBA pixels, including alpha 0, 127, and 
 - [x] Run `cargo fmt --check`, `cargo test --locked --no-default-features`, and `cargo build --release --locked --no-default-features`.
 - [x] Compile-check `x86_64-pc-windows-gnu` if available; retain native MSVC tests in GitHub Actions. Record the exact validation boundary.
 - [x] Inspect the final diff for accidental text/arbitrary-file synchronization, worker leaks, unchecked allocations, incomplete clipboard publication, and credential inclusion.
-- [ ] Package Mac binary plus launch instructions and a two-device acceptance checklist. Record tested commands and any unavailable Windows runtime checks.
+- [x] Package Mac binary plus launch instructions and a two-device acceptance checklist. Record tested commands and any unavailable Windows runtime checks.
 
 Execution uses this session inline. User approval of the design and implementation was received on 2026-10-20; no further implementation approval is required.
 
-Validation so far: 46 native Mac tests passed; `cargo fmt --check`, native Mac release build and Windows GNU target check including tests passed. Native Windows runtime validation and final packages are being produced by CI.
+Validation: 48 native Mac tests pass; formatting, native Mac release build, Windows GNU target checking including tests, and Windows GNU release linking pass. Both packages include launchers, project source and native dependency sources/licenses. Native Windows runtime / physical two-device acceptance remain pending. GitHub upload was not completed because local Git has no push credentials and the connector returned HTTP 403 for writes; the branch is saved locally.

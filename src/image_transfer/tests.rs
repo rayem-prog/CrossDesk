@@ -200,6 +200,37 @@ fn completed_file_batches_preserve_previous_clipboard_files_and_duplicate_names(
     std::fs::remove_dir_all(directory).unwrap();
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn filesystem_equivalent_names_cannot_silently_overwrite_a_received_image() {
+    let directory = temp_directory();
+    let transfer = Transfer {
+        id: [99; 16],
+        kind: Kind::Files,
+        images: vec![
+            ImageData {
+                name: "é.png".into(),
+                data: png(2, 2).0,
+            },
+            ImageData {
+                name: "e\u{301}.png".into(),
+                data: png(3, 3).0,
+            },
+        ],
+    };
+    let cache = directory.join("cache");
+    assert!(
+        transfer.into_payload(&cache).is_err(),
+        "colliding file names overwrote an image"
+    );
+    assert_eq!(
+        std::fs::read_dir(&cache).unwrap().count(),
+        0,
+        "incomplete cache was retained"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 #[test]
 fn declared_image_and_batch_limits_are_checked_before_allocating_contents() {
     fn manifest(count: usize, size: u64) -> Frame {
