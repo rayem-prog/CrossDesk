@@ -78,7 +78,7 @@ Files: platform clipboard adapters, `Cargo.*`, launchers, package script, README
 - [x] Add named Mac ordinary-file/mixed-file adapter tests and compile Windows native tests.
 - [x] Preserve single-image representation only for supported small image files; never read arbitrary huge files solely to create an image representation.
 - [x] Run format/native tests/Windows target check/release builds; prepare Mac ARM64 and Windows x64 archives with corresponding source and dependency licenses.
-- [ ] Verify package contents exclude keys and match commit/binaries; record exact physical validation limits and commit.
+- [x] Verify package contents exclude keys and match commit/binaries; record exact physical validation limits and commit.
 
 Commands: `cargo fmt --check`; `cargo test --locked --no-default-features`; `cargo check --locked --no-default-features --target x86_64-pc-windows-gnu --tests`; native and cross release build; package integrity checks.
 
@@ -87,3 +87,5 @@ Commands: `cargo fmt --check`; `cargo test --locked --no-default-features`; `car
 Implemented inline after explicit user authorization. 78 native Mac tests pass; 129 MiB encrypted streaming acceptance passes separately in release mode; Windows code/tests compile and release links on Mac. Mac named-pasteboard tests include origin receipts and Unicode file identity. Remaining physical Windows/Mac acceptance is documented in VALIDATION.md rather than marked tested.
 
 Private unique staging directories replace the planned `.part` suffix: their paths are never published until full batch verification. Final platform package verification and artifact paths are recorded with delivery. No new dependencies were required.
+
+Final archive QA passed for both native binary packages: CRC, exact tracked-source bytes, executable bytes, corresponding dependency sources/licenses, Mac executable permissions and key exclusion. Mac signature integrity verifies; Windows AMD64 imports only system DLLs. Artifact names: CrossDesk-0.3.0-Mac-ARM64.zip and CrossDesk-0.3.0-Windows-x64.zip. Mac tests: 78 pass plus one separately run 129 MiB release acceptance. This completes local implementation/delivery; physical two-device validation remains explicitly pending.
