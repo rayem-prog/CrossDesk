@@ -8,8 +8,8 @@ use std::{ptr, slice};
 
 use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, POINT};
 use windows_sys::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
-    RegisterClipboardFormatW, SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber,
+    IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
 use windows_sys::Win32::System::Memory::{
     GMEM_MOVEABLE, GMEM_ZEROINIT, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
@@ -24,20 +24,80 @@ const BMP_FILE_HEADER_LEN: usize = 14;
 const BI_RGB: u32 = 0;
 const DROPEFFECT_COPY: u32 = 1;
 
-pub struct Clipboard;
+// A real owner is required by EmptyClipboard / SetClipboardData. A NULL
+// OpenClipboard owner is valid for reads but cannot publish clipboard data.
+pub struct Clipboard {
+    owner: usize,
+}
 
 impl Clipboard {
     pub fn new() -> std::io::Result<Self> {
-        Ok(Self)
+        Ok(Self { owner: 0 })
+    }
+
+    fn owner_window(&mut self) -> std::io::Result<windows_sys::Win32::Foundation::HWND> {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, HWND_MESSAGE};
+        if self.owner == 0 {
+            let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+            let owner = unsafe {
+                CreateWindowExW(
+                    0,
+                    class.as_ptr(),
+                    ptr::null(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    HWND_MESSAGE,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null(),
+                )
+            };
+            if owner.is_null() {
+                return Err(last_os_error("cannot create clipboard owner window"));
+            }
+            self.owner = owner as usize;
+        }
+        Ok(self.owner as _)
+    }
+}
+
+impl Drop for Clipboard {
+    fn drop(&mut self) {
+        if self.owner != 0 {
+            unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(self.owner as _);
+            }
+        }
     }
 }
 
 impl ClipboardApi for Clipboard {
+    fn change_id(&self) -> std::io::Result<u64> {
+        Ok(unsafe { GetClipboardSequenceNumber() } as u64)
+    }
     fn read(&mut self) -> std::io::Result<Option<ClipboardPayload>> {
-        let _guard = ClipboardGuard::open()?;
+        let _guard = ClipboardGuard::open(ptr::null_mut())?;
         if unsafe { IsClipboardFormatAvailable(CF_HDROP as u32) } != 0 {
             if let Some(files) = read_files()? {
                 return Ok(Some(ClipboardPayload::Files(files)));
+            }
+        }
+        if let Some(format) = registered_clipboard_format("PNG") {
+            if unsafe { IsClipboardFormatAvailable(format) } != 0 {
+                let handle = unsafe { GetClipboardData(format) };
+                if !handle.is_null() {
+                    let data = copy_global(handle as HGLOBAL)?;
+                    crate::image_transfer::decode_image(&data)?;
+                    return Ok(Some(ClipboardPayload::Bitmap(data)));
+                }
+            }
+        }
+        if unsafe { IsClipboardFormatAvailable(CF_DIB as u32) } != 0 {
+            if let Some(bitmap) = read_bitmap()? {
+                return Ok(Some(ClipboardPayload::Bitmap(bitmap)));
             }
         }
         if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT as u32) } != 0 {
@@ -55,33 +115,65 @@ impl ClipboardApi for Clipboard {
                 return Ok(Some(ClipboardPayload::Text(text)));
             }
         }
-        if unsafe { IsClipboardFormatAvailable(CF_DIB as u32) } != 0 {
-            if let Some(bitmap) = read_bitmap()? {
-                return Ok(Some(ClipboardPayload::Bitmap(bitmap)));
-            }
-        }
         Ok(None)
     }
 
     fn write(&mut self, payload: &ClipboardPayload) -> std::io::Result<()> {
-        let _guard = ClipboardGuard::open()?;
+        self.publish(payload, None).map(|_| ())
+    }
+    fn write_if_current(
+        &mut self,
+        payload: &ClipboardPayload,
+        expected: u64,
+    ) -> std::io::Result<bool> {
+        self.publish(payload, Some(expected))
+    }
+}
+
+impl Clipboard {
+    fn publish(
+        &mut self,
+        payload: &ClipboardPayload,
+        expected: Option<u64>,
+    ) -> std::io::Result<bool> {
+        if let ClipboardPayload::Bitmap(data) = payload {
+            crate::image_transfer::decode_image(data)?;
+        }
+        let owner = self.owner_window()?;
+        let _guard = ClipboardGuard::open(owner)?;
+        if expected
+            .is_some_and(|revision| unsafe { GetClipboardSequenceNumber() } as u64 != revision)
+        {
+            return Ok(false);
+        }
         if unsafe { EmptyClipboard() } == 0 {
             return Err(last_os_error("EmptyClipboard failed"));
         }
-        match payload {
+        let result = match payload {
             ClipboardPayload::Text(text) => write_text(text),
             ClipboardPayload::Bitmap(bitmap) => write_bitmap(bitmap),
-            ClipboardPayload::Files(files) => write_files(files),
-        }
+            ClipboardPayload::Files(files) => {
+                write_files(files)?;
+                if files.len() == 1 {
+                    if let Ok(bytes) = std::fs::read(&files[0]) {
+                        if crate::image_transfer::decode_image(&bytes).is_ok() {
+                            let _ = write_bitmap(&bytes);
+                        }
+                    }
+                }
+                Ok(())
+            }
+        };
+        result.map(|_| true)
     }
 }
 
 struct ClipboardGuard;
 
 impl ClipboardGuard {
-    fn open() -> std::io::Result<Self> {
+    fn open(owner: windows_sys::Win32::Foundation::HWND) -> std::io::Result<Self> {
         for _ in 0..8 {
-            if unsafe { OpenClipboard(ptr::null_mut()) } != 0 {
+            if unsafe { OpenClipboard(owner) } != 0 {
                 return Ok(Self);
             }
             thread::sleep(Duration::from_millis(12));
@@ -275,6 +367,9 @@ fn copy_global(handle: HGLOBAL) -> std::io::Result<Vec<u8>> {
     if len == 0 {
         return Ok(Vec::new());
     }
+    if len > crate::image_transfer::MAX_IMAGE_BYTES {
+        return Err(std::io::Error::other("clipboard item exceeds 32 MiB"));
+    }
     let ptr = unsafe { GlobalLock(handle) as *const u8 };
     if ptr.is_null() {
         return Err(last_os_error("GlobalLock failed"));
@@ -335,7 +430,7 @@ fn bmp_to_dib(bitmap: &[u8]) -> std::io::Result<Vec<u8>> {
 }
 
 fn image_to_dib(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
-    let image = image::load_from_memory(bytes).map_err(invalid_image)?;
+    let image = crate::image_transfer::decode_image(bytes)?;
     let rgba = image.to_rgba8();
     let (width, height) = rgba.dimensions();
     if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 {
@@ -374,7 +469,7 @@ fn image_to_png(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Ok(bytes.to_vec());
     }
-    let image = image::load_from_memory(bytes).map_err(invalid_image)?;
+    let image = crate::image_transfer::decode_image(bytes)?;
     let mut cursor = Cursor::new(Vec::new());
     image
         .write_to(&mut cursor, image::ImageFormat::Png)
@@ -435,4 +530,76 @@ fn invalid_image(error: image::ImageError) -> std::io::Error {
 fn last_os_error(context: &str) -> std::io::Error {
     let error = std::io::Error::last_os_error();
     std::io::Error::new(error.kind(), format!("{context}: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn png() -> Vec<u8> {
+        let image = image::RgbaImage::from_raw(2, 1, vec![255, 0, 0, 255, 0, 255, 0, 127]).unwrap();
+        let mut bytes = Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    }
+    #[test]
+    fn clipboard_owner_is_a_valid_window_and_is_destroyed_with_the_clipboard() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::IsWindow;
+        let mut clipboard = Clipboard::new().unwrap();
+        let owner = clipboard.owner_window().unwrap();
+        assert_ne!(unsafe { IsWindow(owner) }, 0);
+        drop(clipboard);
+        assert_eq!(unsafe { IsWindow(owner) }, 0);
+    }
+    #[test]
+    fn windows_image_representations_have_correct_dimensions_channel_order_and_png_alpha() {
+        let bytes = png();
+        let dib = image_to_dib(&bytes).unwrap();
+        assert_eq!(i32::from_le_bytes(dib[4..8].try_into().unwrap()), 2);
+        assert_eq!(i32::from_le_bytes(dib[8..12].try_into().unwrap()), 1);
+        assert_eq!(&dib[40..], &[0, 0, 255, 255, 0, 255, 0, 127]);
+        let preserved = image_to_png(&bytes).unwrap();
+        assert_eq!(
+            image::load_from_memory(&preserved)
+                .unwrap()
+                .into_rgba8()
+                .into_raw(),
+            vec![255, 0, 0, 255, 0, 255, 0, 127]
+        );
+    }
+    #[test]
+    #[ignore = "Uses the Windows system clipboard; run only on the disposable CI desktop"]
+    fn native_windows_image_and_file_clipboard_round_trip() {
+        assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
+        let mut clipboard = Clipboard::new().unwrap();
+        clipboard.write(&ClipboardPayload::Bitmap(png())).unwrap();
+        let Some(ClipboardPayload::Bitmap(received)) = clipboard.read().unwrap() else {
+            panic!("image missing");
+        };
+        assert_eq!(
+            image::load_from_memory(&received)
+                .unwrap()
+                .into_rgba8()
+                .into_raw(),
+            vec![255, 0, 0, 255, 0, 255, 0, 127]
+        );
+        let path = std::env::temp_dir().join(format!("CrossDesk-截图-{}.png", std::process::id()));
+        std::fs::write(&path, png()).unwrap();
+        clipboard
+            .write(&ClipboardPayload::Files(vec![path.clone()]))
+            .unwrap();
+        assert!(
+            matches!(clipboard.read().unwrap(), Some(ClipboardPayload::Files(files)) if files == vec![path.clone()])
+        );
+        assert!(
+            clipboard
+                .write(&ClipboardPayload::Bitmap(vec![1, 2, 3]))
+                .is_err()
+        );
+        assert!(
+            matches!(clipboard.read().unwrap(), Some(ClipboardPayload::Files(files)) if files == vec![path.clone()])
+        );
+        clipboard.write(&ClipboardPayload::Text("".into())).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
 }

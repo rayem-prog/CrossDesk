@@ -1,33 +1,36 @@
-# CrossDesk 0.1.0 validation — 2026-10-19
+# CrossDesk 0.2.0 validation — 2026-10-20
 
-Environment: Windows 11 x64; Rust 1.99.1; x86_64-pc-windows-gnu.
+## Automated validation
 
-- Windows release executable built locally.
-- 27 tests passed: both-edge routing, all four transitions, fast edge crossing,
-  vertical mapping, small dimensions, negative and staggered desktop coordinates,
-  internal monitor joins, held-button behavior, emergency release state,
-  protocol validation, malformed keys, pairing mismatch, ciphertext tampering,
-  concurrent encrypted writers, large encrypted stream framing, key-file
-  overwrite protection, and Windows native hook/window registration and cleanup.
-- The native hook test installs no capture state and does not move or constrain
-  the user's cursor.
-- Apple Silicon Rust target passed type checking with native C compilation
-  skipped explicitly using CROSSDESK_CHECK_ONLY=1.
-- The Windows executable imports only Windows system DLLs; no extra runtime DLLs
-  are needed. Its help command ran outside the developer toolchain environment.
-- Clippy completed successfully with style suggestions in retained upstream code.
-- Reproduced Windows error 10035 with an accepted nonblocking socket. The added
-  regression passes after restoring blocking mode before the encrypted handshake,
-  including delayed handshake data and a delayed client hello. Read/write timeouts
-  remain enabled.
+Local environment: Apple Silicon, macOS 27.0.1, Rust 1.98.1.
 
-Pending real-device checks:
+- Native macOS build compiles the C input backend and links Apple frameworks; `CROSSDESK_CHECK_ONLY` is not set.
+- The common transfer tests use real PNG/JPEG bytes, encrypted TCP connections, images larger than 64 KiB, simultaneous transfers in both directions, and interleaved input/heartbeat frames.
+- Tests cover alpha/pixels, Chinese names, exact file bytes, duplicate names, count/size limits, unsafe paths, mixed selections, interrupted transfers, offsets, digests and invalid images.
+- The real clipboard worker is exercised with an in-memory OS boundary over encrypted TCP: startup content is not sent, a remote write is not echoed, the next local image is sent, and the worker stops and joins.
+- macOS adapter tests use named NSPasteboards, leaving the user's general clipboard untouched. They check PNG alpha/pixels, multiple real file URLs, a single file's image representation, and stale-write rejection.
+- Windows Rust code and tests are compile-checked for `x86_64-pc-windows-gnu`. Native Windows format conversion, hidden owner-window lifecycle and clipboard publication are tested by the MSVC CI job. The clipboard test is ignored in ordinary local test runs and runs explicitly only on the disposable GitHub runner.
+- Existing encrypted pairing, version/CLI validation, input routing, socket blocking-mode and input cleanup regressions remain in the suite.
 
-- Native macOS C compilation/linking and Accessibility permission behavior.
-- Actual pointer, button, scroll, text/IME and window dragging on M1 Pro/macOS 27.0.1.
-- Physical unplug, Wi-Fi loss, sleep/wake, and reconnect behavior across both machines.
+Exact CI status and downloadable paired builds are available in [GitHub Actions](https://github.com/rayem-prog/CrossDesk/actions). A successful Mac test or Windows cross-check alone does not establish Windows runtime or physical two-device behavior.
 
-There is no claim of completed execution on the user's Mac or dual-machine validation.
-Remote Windows and macOS builds run through [GitHub Actions](https://github.com/rayem-prog/CrossDesk/actions);
-consult the individual run for its status. The checks above describe local validation.
-Cross-machine file dragging is outside this input prototype.
+## Physical two-device acceptance checklist
+
+Use both 0.2.0 builds with the same private key. Confirm `protocol v5` and `image clipboard: on` in the terminal.
+
+- Copy a screenshot to the Windows clipboard; paste into a Mac image-aware app. Repeat from Mac to Windows. Check size, colors and transparency with a transparent PNG.
+- Copy a PNG and a JPEG with Chinese names in Explorer; paste both into a Finder folder. Repeat in the other direction and compare file bytes/names.
+- Copy a single image file; paste into both a destination folder and an image-aware app. Check the specific chat/editor apps you use.
+- While a large image transfers, move/type on the Mac through CrossDesk. Confirm input remains usable and both terminals stay connected.
+- During an incoming transfer, copy a different local image. Confirm the new local copy is preserved. Copy again at the source if the remote completion was skipped.
+- Copy two different images rapidly after receiving an image; confirm the final local copy sends and there is no repeating echo traffic.
+- Interrupt Wi-Fi during transfer. Confirm no partial image is published, remote input releases, the image worker stops, and reconnect creates one worker. After reconnect, copy again to send.
+- Start either end with `--image-clipboard off`; confirm image sync is off in both directions while keyboard/mouse sharing works.
+- Try a mixed PNG/text-file selection and an oversized image; confirm the selection is skipped without disturbing input or the existing destination clipboard.
+- Stop with Ctrl+C and test emergency input release with Ctrl+Alt+Esc or Scroll Lock on Windows.
+
+Actual hardware/app compatibility, physical Wi-Fi loss, sleep/wake, Accessibility permission prompts and pointer/IME behavior require these device checks. Automated tests do not claim they have been completed.
+
+## Prior baseline
+
+Version 0.1.0 was originally built and tested on Windows 11 x64. The baseline includes the fix restoring accepted sockets to blocking mode before the encrypted handshake, with delayed-handshake regression coverage. Cross-device file dragging remains outside the implemented feature.

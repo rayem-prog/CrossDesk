@@ -1,6 +1,6 @@
 # Image Clipboard Implementation Plan
 
-> **For agentic workers:** Execute this approved plan inline, task-by-task, with a failing-test / implementation / passing-test cycle and recorded validation. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Execute this approved plan inline, task-by-task, with a failing-test / implementation / passing-test cycle and recorded validation. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Copy screenshots, image content, and PNG/JPG image files between a Windows server and Apple Silicon Mac client through their existing encrypted connection.
 
@@ -26,11 +26,11 @@
 
 **Interfaces:** `Hello.image_clipboard: bool`; `image_transfer::Transfer::from_clipboard(&ClipboardPayload) -> io::Result<Transfer>`; `Transfer::frames() -> io::Result<Vec<Frame>>` is a test adapter only (production iterates chunks); `Incoming::receive(Frame) -> io::Result<Option<Transfer>>`; `FrameKind::{ImageStart,ImageChunk,ImageEnd}`.
 
-- [ ] Add failing tests exercising frame rejection/acceptance, CLI invalid option values, and a real >64 KiB image transfer through encrypted TCP.
-- [ ] Implement v5 capability negotiation, validated on/off option, bounded manifest and offset-checked chunk decoding.
-- [ ] Normalize bitmap pixels with bounded image decoding and retain verified file bytes. SHA-256 authenticates whole-transfer assembly in addition to the existing encrypted records.
-- [ ] Assert corruption, missing chunks, repeated/out-of-order offsets, bad names, total limits, and PNG alpha preservation are rejected or preserved as appropriate.
-- [ ] Run `cargo test --no-default-features image_transfer` and `cargo test --no-default-features protocol`.
+- [x] Add failing tests exercising frame rejection/acceptance, CLI invalid option values, and a real >64 KiB image transfer through encrypted TCP.
+- [x] Implement v5 capability negotiation, validated on/off option, bounded manifest and offset-checked chunk decoding.
+- [x] Normalize bitmap pixels with bounded image decoding and retain verified file bytes. SHA-256 authenticates whole-transfer assembly in addition to the existing encrypted records.
+- [x] Assert corruption, missing chunks, repeated/out-of-order offsets, bad names, total limits, and PNG alpha preservation are rejected or preserved as appropriate.
+- [x] Run `cargo test --no-default-features image_transfer` and `cargo test --no-default-features protocol`.
 
 Behavioral test shape:
 
@@ -54,11 +54,11 @@ The test fixture encodes hand-constructed RGBA pixels, including transparent pix
 
 **Interfaces:** `ImageSession::start(writer: SharedWriter, enabled: bool) -> io::Result<ImageSession>`; `ImageSession::receive(&mut self, frame: Frame) -> io::Result<()>`; `ImageSession::handles(FrameKind) -> bool`; dropping a session signals and joins its clipboard worker. `ClipboardApi::change_id(&self) -> io::Result<u64>` supports generation checks.
 
-- [ ] Test the common synchronization state with actual image fingerprints: remote A read back as another encoding is not emitted, immediately following local B is emitted.
-- [ ] Test stale remote completion versus newer local revision and failure-to-publish behavior.
-- [ ] Implement local baseline capture, bounded incoming queue, atomic full-batch publishing, content deduplication, and session shutdown.
-- [ ] Route only negotiated image frames through the new session; preserve legacy opt-in mode separately and prevent duplicate legacy/new observers.
-- [ ] Test stop during polling and transport failure; run the encrypted image-plus-input round trip to verify interleaving and simultaneous directions.
+- [x] Test the common synchronization state with actual image fingerprints: remote A read back as another encoding is not emitted, immediately following local B is emitted.
+- [x] Test stale remote completion versus newer local revision and failure-to-publish behavior.
+- [x] Implement local baseline capture, bounded incoming queue, atomic full-batch publishing, content deduplication, and session shutdown.
+- [x] Route only negotiated image frames through the new session; preserve legacy opt-in mode separately and prevent duplicate legacy/new observers.
+- [x] Test stop during polling and transport failure; run the encrypted image-plus-input round trip to verify interleaving and simultaneous directions.
 
 Behavioral state test shape:
 
@@ -74,11 +74,11 @@ assert!(!may_publish_remote(10, 11, None));
 
 **Files:** Modify `src/clipboard/macos.rs`, `src/clipboard/windows.rs`; share pure image conversions in `src/image_transfer.rs` where useful.
 
-- [ ] Add native isolated-pasteboard Mac tests and pure Windows image-format conversion tests before changing adapters.
-- [ ] Prioritize actual image data over auxiliary text; handle Windows PNG plus DIB and Mac PNG/TIFF/JPEG representations.
-- [ ] Fix macOS file-list standard output; write image file URLs / CF_HDROP and the single-image bitmap representation together.
-- [ ] Add revision tracking and ensure malformed images fail before clearing the current clipboard.
-- [ ] Run native Mac tests; compile-check the Windows target and keep Windows-specific tests in existing CI.
+- [x] Add native isolated-pasteboard Mac tests and pure Windows image-format conversion tests before changing adapters.
+- [x] Prioritize actual image data over auxiliary text; handle Windows PNG plus DIB and Mac PNG/TIFF/JPEG representations.
+- [x] Fix macOS file-list standard output; write image file URLs / CF_HDROP and the single-image bitmap representation together.
+- [x] Add revision tracking and ensure malformed images fail before clearing the current clipboard.
+- [x] Run native Mac tests; compile-check the Windows target and keep Windows-specific tests in existing CI.
 
 Pixel fixture expectations use literal RGBA pixels, including alpha 0, 127, and 255. File-list tests use two real small images and Chinese names in an isolated temporary directory; no test overwrites the user's general clipboard.
 
@@ -86,10 +86,12 @@ Pixel fixture expectations use literal RGBA pixels, including alpha 0, 127, and 
 
 **Files:** Update `README.md`, `VALIDATION.md`, `THIRD_PARTY_NOTICES.md`, start scripts and `.github/workflows/crossdesk-input.yml` where needed.
 
-- [ ] Document Cmd/Ctrl+C and Cmd/Ctrl+V for image-aware apps and file managers, enabled/disabled behavior, limits, and simultaneous version upgrade.
-- [ ] Run `cargo fmt --check`, `cargo test --locked --no-default-features`, and `cargo build --release --locked --no-default-features`.
-- [ ] Compile-check `x86_64-pc-windows-gnu` if available; retain native MSVC tests in GitHub Actions. Record the exact validation boundary.
-- [ ] Inspect the final diff for accidental text/arbitrary-file synchronization, worker leaks, unchecked allocations, incomplete clipboard publication, and credential inclusion.
+- [x] Document Cmd/Ctrl+C and Cmd/Ctrl+V for image-aware apps and file managers, enabled/disabled behavior, limits, and simultaneous version upgrade.
+- [x] Run `cargo fmt --check`, `cargo test --locked --no-default-features`, and `cargo build --release --locked --no-default-features`.
+- [x] Compile-check `x86_64-pc-windows-gnu` if available; retain native MSVC tests in GitHub Actions. Record the exact validation boundary.
+- [x] Inspect the final diff for accidental text/arbitrary-file synchronization, worker leaks, unchecked allocations, incomplete clipboard publication, and credential inclusion.
 - [ ] Package Mac binary plus launch instructions and a two-device acceptance checklist. Record tested commands and any unavailable Windows runtime checks.
 
 Execution uses this session inline. User approval of the design and implementation was received on 2026-10-20; no further implementation approval is required.
+
+Validation so far: 46 native Mac tests passed; `cargo fmt --check`, native Mac release build and Windows GNU target check including tests passed. Native Windows runtime validation and final packages are being produced by CI.

@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::clipboard::session::ImageSession;
 use crate::clipboard::{Clipboard, ClipboardApi};
 use crate::file_transfer;
 use crate::input::InputSink;
@@ -80,7 +81,13 @@ fn run_session(server: &str, key: &[u8; 32]) -> std::io::Result<()> {
     let receive_root = std::env::temp_dir().join("deskbridge-received");
     let mut incoming_files = file_transfer::IncomingBundle::new(receive_root);
     let clipboard_state = Arc::new(Mutex::new(ClipboardSyncState::default()));
-    spawn_clipboard_watcher(writer.clone(), Arc::clone(&clipboard_state));
+    let mut images = ImageSession::start(
+        writer.clone(),
+        crate::transport::image_clipboard_enabled() && server_hello.image_clipboard,
+    )?;
+    if !images.enabled() {
+        spawn_clipboard_watcher(writer.clone(), Arc::clone(&clipboard_state));
+    }
     let mut input_log = InputLog::new();
 
     loop {
@@ -92,6 +99,12 @@ fn run_session(server: &str, key: &[u8; 32]) -> std::io::Result<()> {
             Err(_) if stop_requested.load(Ordering::Acquire) => return Ok(()),
             Err(e) => return Err(e),
         };
+        if ImageSession::handles(frame.kind) {
+            if let Err(error) = images.receive(frame) {
+                eprintln!("image transfer rejected: {error}");
+            }
+            continue;
+        }
         if !crate::transport::clipboard_enabled()
             && !matches!(frame.kind, FrameKind::Ping | FrameKind::Input)
         {

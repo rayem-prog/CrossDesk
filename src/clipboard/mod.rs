@@ -19,6 +19,22 @@ pub use unsupported::Clipboard;
 pub use windows::Clipboard;
 
 pub trait ClipboardApi {
+    fn change_id(&self) -> std::io::Result<u64> {
+        Ok(0)
+    }
     fn read(&mut self) -> std::io::Result<Option<ClipboardPayload>>;
     fn write(&mut self, payload: &ClipboardPayload) -> std::io::Result<()>;
+    fn write_if_current(
+        &mut self,
+        payload: &ClipboardPayload,
+        expected: u64,
+    ) -> std::io::Result<bool> {
+        if self.change_id()? != expected {
+            return Ok(false);
+        }
+        self.write(payload)?;
+        Ok(true)
+    }
 }
+
+pub mod session;

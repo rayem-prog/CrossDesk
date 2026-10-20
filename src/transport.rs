@@ -81,6 +81,11 @@ pub fn clipboard_enabled() -> bool {
     std::env::var("CROSSDESK_ENABLE_CLIPBOARD").is_ok_and(|v| v == "1")
 }
 
+pub fn image_clipboard_enabled() -> bool {
+    cfg!(any(windows, target_os = "macos"))
+        && std::env::var("CROSSDESK_IMAGE_CLIPBOARD").map_or(true, |v| v != "off")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
