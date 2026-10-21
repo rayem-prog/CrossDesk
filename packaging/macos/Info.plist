@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>NSLocalNetworkUsageDescription</key><string>CrossDesk 使用局域网发现你配对的 Windows，并在两台电脑之间共享键鼠、图片和文件。</string>
+<key>NSBonjourServices</key><array><string>_crossdesk._tcp</string></array>
+</dict></plist>

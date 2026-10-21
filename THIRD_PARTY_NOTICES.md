@@ -26,3 +26,9 @@ The locally cross-built Windows GNU executable uses MinGW-w64 14.0.0 target libr
 ## CrossDesk 0.3.0 modifications — 2026-10-20
 
 Adds bounded, acknowledged ordinary-file clipboard transfer, protocol v6 capabilities and publication results; fixes publication/recopy races and legacy receiver completeness, cache lifetime, collisions and receive limits. Uses existing SHA-256 and encrypted transport dependencies. Retains GPL-3.0-only and upstream notices. No pairing keys are part of the source or packages.
+
+## CrossDesk 0.4.0 modifications — 2026-10-21
+
+Replaces the manual setup GUI with one-time code pairing, LAN device discovery, durable device preferences, automatic reconnection, structured process state and complete child/service shutdown. Preserves protocol v6 image/file transfer and GPL-3.0-only. No upstream data is removed by the new packaging scripts.
+
+Pairing uses [RustCrypto/PAKEs spake2](https://github.com/RustCrypto/PAKEs) 0.4.0 (MIT OR Apache-2.0), [RustCrypto/KDFs hkdf](https://github.com/RustCrypto/KDFs) (MIT OR Apache-2.0), and the existing snow transport. The SPAKE2 implementation is not independently audited. Discovery uses [mdns-sd](https://github.com/keepsimple1/mdns-sd) (Apache-2.0 OR MIT). Desktop uses [Tauri](https://github.com/tauri-apps/tauri) and official single-instance/dialog plugins (MIT OR Apache-2.0). Web uses React (MIT), Lucide (ISC) and their locked dependencies; build/test tools retain their original licenses. Cargo.lock and web/package-lock.json specify exact resolved versions. GUI packages include corresponding project and Rust dependency source, and installed JavaScript license/notice files with a dependency index. Existing Deskbridge artwork retains its upstream license.

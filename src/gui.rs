@@ -1,342 +1,220 @@
-use std::process::Command;
-use std::sync::Mutex;
-
-use serde::{Deserialize, Serialize};
-
-use crate::config::{self, AppConfig, KeyTarget, Language, ModifierTarget, Role};
-use crate::control::{ControlBackend, ProcessBackend};
-use crate::server::Edge;
-
-const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-const RELEASES_URL: &str = "https://github.com/paulhe666/deskbridge/releases";
-const LATEST_RELEASE_API: &str =
-    "https://api.github.com/repos/paulhe666/deskbridge/releases/latest";
-
-pub fn run() -> std::io::Result<()> {
-    tauri::Builder::default()
-        .manage(AppState {
-            config: Mutex::new(AppConfig::load()),
-            backend: Mutex::new(ProcessBackend::default()),
-        })
-        .invoke_handler(tauri::generate_handler![
-            get_state,
-            save_config,
-            start_service,
-            stop_service,
-            clear_logs,
-            check_for_updates,
-            open_release_page
-        ])
-        .run(tauri::generate_context!())
-        .map_err(|error| std::io::Error::other(error.to_string()))
-}
-
-struct AppState {
-    config: Mutex<AppConfig>,
-    backend: Mutex<ProcessBackend>,
-}
-
-#[tauri::command]
-fn get_state(state: tauri::State<'_, AppState>) -> Result<ApiState, String> {
-    Ok(build_state(state.inner()))
-}
-
-#[tauri::command]
-fn save_config(config: ConfigView, state: tauri::State<'_, AppState>) -> Result<ApiState, String> {
-    {
-        let mut current = state
-            .config
-            .lock()
-            .map_err(|_| "config mutex poisoned".to_string())?;
-        let path = config::set_config_path_override(&config.config_path)
-            .map_err(|error| format!("failed to set config path: {error}"))?;
-        config.apply_to(&mut current);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("failed to create config directory: {error}"))?;
-        }
-        current
-            .save()
-            .map_err(|error| format!("failed to save config: {error}"))?;
-    }
-
-    Ok(build_state(state.inner()))
-}
-
-#[tauri::command]
-fn start_service(state: tauri::State<'_, AppState>) -> Result<ApiState, String> {
-    let config = {
-        let config = state
-            .config
-            .lock()
-            .map_err(|_| "config mutex poisoned".to_string())?
-            .clone();
-        config
-            .save()
-            .map_err(|error| format!("failed to save config: {error}"))?;
-        config
-    };
-
-    {
-        let mut backend = state
-            .backend
-            .lock()
-            .map_err(|_| "backend mutex poisoned".to_string())?;
-        if let Err(error) = backend.start(&config) {
-            backend.push_log(format!("Failed to start service: {error}"));
-            return Err(format!("failed to start service: {error}"));
-        }
-    }
-
-    Ok(build_state(state.inner()))
-}
-
-#[tauri::command]
-fn stop_service(state: tauri::State<'_, AppState>) -> Result<ApiState, String> {
-    {
-        let mut backend = state
-            .backend
-            .lock()
-            .map_err(|_| "backend mutex poisoned".to_string())?;
-        if let Err(error) = backend.stop() {
-            backend.push_log(format!("Failed to stop service: {error}"));
-            return Err(format!("failed to stop service: {error}"));
-        }
-    }
-
-    Ok(build_state(state.inner()))
-}
-
-#[tauri::command]
-fn clear_logs(state: tauri::State<'_, AppState>) -> Result<ApiState, String> {
-    state
-        .backend
-        .lock()
-        .map_err(|_| "backend mutex poisoned".to_string())?
-        .clear_logs();
-    Ok(build_state(state.inner()))
-}
-
-#[tauri::command]
-fn check_for_updates() -> Result<UpdateInfo, String> {
-    fetch_update_info().map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn open_release_page() -> Result<(), String> {
-    open_url(RELEASES_URL)
-}
-
-fn build_state(state: &AppState) -> ApiState {
-    let config = state.config.lock().expect("config mutex poisoned").clone();
-    let mut backend = state.backend.lock().expect("backend mutex poisoned");
-    backend.collect_logs();
-    let running = backend.is_running();
-    let command_preview = backend.command_preview(&config);
-    let logs = backend.logs().iter().cloned().collect();
-
-    ApiState {
-        config: ConfigView::from_config(&config),
-        running,
-        command_preview,
-        logs,
-    }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UpdateInfo {
-    current_version: String,
-    latest_version: String,
-    has_update: bool,
-    release_url: String,
-    release_name: String,
+// CrossDesk simple desktop flow, 2026-10-21 (GPL-3.0-only).
+use crate::easy_connect::{Command, ConnectView, Controller};
+use crate::trust_store::parse_id;
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
+};
+use tauri::Manager;
+struct DesktopState {
+    controller: Option<Arc<Controller>>,
     error: Option<String>,
 }
-
-#[derive(Debug, Deserialize)]
-struct GithubRelease {
-    tag_name: String,
-    name: Option<String>,
-    html_url: String,
+impl DesktopState {
+    fn view(&self) -> ConnectView {
+        if let Some(c) = &self.controller {
+            c.view()
+        } else {
+            let mut v = ConnectView::loading();
+            v.state = "error".into();
+            v.error = self.error.clone();
+            v
+        }
+    }
+    fn send(&self, c: Command) -> Result<(), String> {
+        self.controller
+            .as_ref()
+            .ok_or_else(|| {
+                self.error
+                    .clone()
+                    .unwrap_or_else(|| "应用尚未准备好".into())
+            })?
+            .submit(c)
+            .map_err(|e| e.to_string())
+    }
 }
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ApiState {
-    config: ConfigView,
-    running: bool,
-    command_preview: String,
-    logs: Vec<String>,
+pub fn run() -> std::io::Result<()> {
+    let app = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let result = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| e.to_string())
+                .and_then(|root| Controller::open(root).map_err(|e| e.to_string()));
+            let state = match result {
+                Ok(c) => DesktopState {
+                    controller: Some(Arc::new(c)),
+                    error: None,
+                },
+                Err(e) => DesktopState {
+                    controller: None,
+                    error: Some(format!("无法读取应用数据：{e}")),
+                },
+            };
+            app.manage(state);
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                window.app_handle().exit(0);
+            }
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_connect_state,
+            select_device,
+            pair_device,
+            connect_device,
+            disconnect_device,
+            refresh_devices,
+            forget_device,
+            set_options,
+            manual_connect,
+            open_permissions,
+            open_project_page
+        ])
+        .build(tauri::generate_context!())
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let exiting = Arc::new(AtomicU8::new(0));
+    app.run(move |app, event| {
+        if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            if exiting.load(Ordering::Acquire) < 2 {
+                api.prevent_exit();
+                if exiting
+                    .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    let controller = app.state::<DesktopState>().controller.clone();
+                    let app = app.clone();
+                    let exiting = exiting.clone();
+                    std::thread::spawn(move || {
+                        if let Some(c) = controller {
+                            c.shutdown();
+                        }
+                        exiting.store(2, Ordering::Release);
+                        app.exit(0);
+                    });
+                }
+            }
+        }
+    });
+    Ok(())
 }
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ConfigView {
-    role: String,
-    language: String,
-    bind: String,
-    server: String,
-    edge: String,
-    scroll_scale: f64,
-    scroll_response: f64,
-    scroll_max_step: f64,
-    scroll_frame_ms: u64,
-    mac_command_mapping: String,
-    mac_control_mapping: String,
-    mac_option_mapping: String,
-    mac_shift_mapping: String,
-    mac_caps_lock_mapping: String,
-    mac_escape_mapping: String,
-    mac_backspace_mapping: String,
-    mac_delete_mapping: String,
-    mac_arrow_left_mapping: String,
-    mac_arrow_right_mapping: String,
-    mac_arrow_up_mapping: String,
-    mac_arrow_down_mapping: String,
-    auto_update_check: bool,
-    config_path: String,
+#[tauri::command]
+fn get_connect_state(state: tauri::State<'_, DesktopState>) -> ConnectView {
+    state.view()
 }
-
-fn fetch_update_info() -> Result<UpdateInfo, Box<dyn std::error::Error>> {
-    let release: GithubRelease = reqwest::blocking::Client::builder()
-        .user_agent("Deskbridge-Updater")
-        .build()?
-        .get(LATEST_RELEASE_API)
-        .send()?
-        .error_for_status()?
-        .json()?;
-    let latest_version = normalize_version(&release.tag_name);
-    let current_version = APP_VERSION.to_string();
-    let has_update = compare_versions(&latest_version, APP_VERSION).is_gt();
-    Ok(UpdateInfo {
-        current_version,
-        latest_version,
-        has_update,
-        release_url: release.html_url,
-        release_name: release.name.unwrap_or(release.tag_name),
-        error: None,
+#[tauri::command]
+fn select_device(id: String, state: tauri::State<'_, DesktopState>) -> Result<(), String> {
+    state.send(Command::Select(parse_id(&id).map_err(|e| e.to_string())?))
+}
+#[tauri::command]
+fn pair_device(code: String, state: tauri::State<'_, DesktopState>) -> Result<(), String> {
+    state.send(Command::Pair(code))
+}
+#[tauri::command]
+fn connect_device(state: tauri::State<'_, DesktopState>) -> Result<(), String> {
+    state.send(Command::Connect)
+}
+#[tauri::command]
+fn disconnect_device(state: tauri::State<'_, DesktopState>) -> Result<(), String> {
+    state.send(Command::Disconnect)
+}
+#[tauri::command]
+fn refresh_devices(state: tauri::State<'_, DesktopState>) -> Result<(), String> {
+    state.send(Command::Refresh)
+}
+#[tauri::command]
+fn forget_device(state: tauri::State<'_, DesktopState>) -> Result<(), String> {
+    state.send(Command::Forget)
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Options {
+    auto_connect: bool,
+    image_clipboard: bool,
+    file_clipboard: bool,
+}
+#[tauri::command]
+fn set_options(options: Options, state: tauri::State<'_, DesktopState>) -> Result<(), String> {
+    state.send(Command::Options {
+        auto: options.auto_connect,
+        image: options.image_clipboard,
+        files: options.file_clipboard,
     })
 }
-
-fn open_url(url: &str) -> Result<(), String> {
-    let status = if cfg!(target_os = "macos") {
-        Command::new("open").arg(url).status()
-    } else if cfg!(windows) {
-        Command::new("cmd").args(["/C", "start", "", url]).status()
+#[tauri::command]
+fn manual_connect(
+    address: String,
+    key_path: String,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<(), String> {
+    let address = if let Ok(ip) = address.parse::<std::net::IpAddr>() {
+        std::net::SocketAddr::new(ip, 24920)
     } else {
-        Command::new("xdg-open").arg(url).status()
+        address
+            .parse()
+            .map_err(|_| "请输入有效 IP 地址".to_string())?
+    };
+    if address.port() == 0 || address.ip().is_unspecified() || address.ip().is_multicast() {
+        return Err("请输入设备的有效 IP 地址".into());
     }
-    .map_err(|error| format!("failed to open browser: {error}"))?;
-
-    if status.success() {
+    state.send(Command::Manual {
+        address,
+        key: PathBuf::from(key_path),
+    })
+}
+#[tauri::command]
+async fn open_permissions() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        #[cfg(target_os = "macos")]
+        {
+            let status = std::process::Command::new("open")
+                .arg(
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+                )
+                .status()
+                .map_err(|e| e.to_string())?;
+            if !status.success() {
+                return Err("请打开系统设置中的辅助功能权限".into());
+            }
+        }
         Ok(())
-    } else {
-        Err(format!("browser command exited with status: {status}"))
-    }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
-
-fn normalize_version(version: &str) -> String {
-    version.trim().trim_start_matches('v').to_string()
-}
-
-fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
-    let left_parts = version_parts(left);
-    let right_parts = version_parts(right);
-    for index in 0..3 {
-        let ordering = left_parts[index].cmp(&right_parts[index]);
-        if ordering != std::cmp::Ordering::Equal {
-            return ordering;
-        }
-    }
-    std::cmp::Ordering::Equal
-}
-
-fn version_parts(version: &str) -> [u64; 3] {
-    let mut parts = [0, 0, 0];
-    for (index, part) in normalize_version(version).split('.').take(3).enumerate() {
-        let digits: String = part.chars().take_while(|ch| ch.is_ascii_digit()).collect();
-        parts[index] = digits.parse().unwrap_or(0);
-    }
-    parts
-}
-
-impl ConfigView {
-    fn from_config(config: &AppConfig) -> Self {
-        Self {
-            role: match config.role {
-                Role::Server => "server",
-                Role::Client => "client",
+#[tauri::command]
+async fn open_project_page() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let url = "https://github.com/rayem-prog/CrossDesk";
+        #[cfg(target_os = "macos")]
+        let result = std::process::Command::new("open").arg(url).status();
+        #[cfg(windows)]
+        let result = std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .status();
+        #[cfg(not(any(target_os = "macos", windows)))]
+        let result = std::process::Command::new("xdg-open").arg(url).status();
+        result.map_err(|e| e.to_string()).and_then(|s| {
+            if s.success() {
+                Ok(())
+            } else {
+                Err("请在浏览器打开项目主页".into())
             }
-            .to_string(),
-            language: config.language.as_str().to_string(),
-            bind: config.bind.clone(),
-            server: config.server.clone(),
-            edge: match config.edge {
-                Edge::Left => "left",
-                Edge::Right => "right",
-                Edge::Both => "both",
-            }
-            .to_string(),
-            scroll_scale: config.scroll_scale,
-            scroll_response: config.scroll_response,
-            scroll_max_step: config.scroll_max_step,
-            scroll_frame_ms: config.scroll_frame_ms,
-            mac_command_mapping: config.mac_command_mapping.as_str().to_string(),
-            mac_control_mapping: config.mac_control_mapping.as_str().to_string(),
-            mac_option_mapping: config.mac_option_mapping.as_str().to_string(),
-            mac_shift_mapping: config.mac_shift_mapping.as_str().to_string(),
-            mac_caps_lock_mapping: config.mac_caps_lock_mapping.as_str().to_string(),
-            mac_escape_mapping: config.mac_escape_mapping.as_str().to_string(),
-            mac_backspace_mapping: config.mac_backspace_mapping.as_str().to_string(),
-            mac_delete_mapping: config.mac_delete_mapping.as_str().to_string(),
-            mac_arrow_left_mapping: config.mac_arrow_left_mapping.as_str().to_string(),
-            mac_arrow_right_mapping: config.mac_arrow_right_mapping.as_str().to_string(),
-            mac_arrow_up_mapping: config.mac_arrow_up_mapping.as_str().to_string(),
-            mac_arrow_down_mapping: config.mac_arrow_down_mapping.as_str().to_string(),
-            auto_update_check: config.auto_update_check,
-            config_path: config::config_path().to_string_lossy().to_string(),
-        }
-    }
-
-    fn apply_to(self, config: &mut AppConfig) {
-        config.role = if self.role == "server" {
-            Role::Server
-        } else {
-            Role::Client
-        };
-        config.language = Language::parse(&self.language).unwrap_or(config.language);
-        config.bind = self.bind;
-        config.server = self.server;
-        config.edge = Edge::parse(&self.edge).unwrap_or(config.edge);
-        config.scroll_scale = self.scroll_scale;
-        config.scroll_response = self.scroll_response;
-        config.scroll_max_step = self.scroll_max_step;
-        config.scroll_frame_ms = self.scroll_frame_ms;
-        config.mac_command_mapping =
-            ModifierTarget::parse(&self.mac_command_mapping).unwrap_or(config.mac_command_mapping);
-        config.mac_control_mapping =
-            ModifierTarget::parse(&self.mac_control_mapping).unwrap_or(config.mac_control_mapping);
-        config.mac_option_mapping =
-            ModifierTarget::parse(&self.mac_option_mapping).unwrap_or(config.mac_option_mapping);
-        config.mac_shift_mapping =
-            ModifierTarget::parse(&self.mac_shift_mapping).unwrap_or(config.mac_shift_mapping);
-        config.mac_caps_lock_mapping =
-            KeyTarget::parse(&self.mac_caps_lock_mapping).unwrap_or(config.mac_caps_lock_mapping);
-        config.mac_escape_mapping =
-            KeyTarget::parse(&self.mac_escape_mapping).unwrap_or(config.mac_escape_mapping);
-        config.mac_backspace_mapping =
-            KeyTarget::parse(&self.mac_backspace_mapping).unwrap_or(config.mac_backspace_mapping);
-        config.mac_delete_mapping =
-            KeyTarget::parse(&self.mac_delete_mapping).unwrap_or(config.mac_delete_mapping);
-        config.mac_arrow_left_mapping =
-            KeyTarget::parse(&self.mac_arrow_left_mapping).unwrap_or(config.mac_arrow_left_mapping);
-        config.mac_arrow_right_mapping = KeyTarget::parse(&self.mac_arrow_right_mapping)
-            .unwrap_or(config.mac_arrow_right_mapping);
-        config.mac_arrow_up_mapping =
-            KeyTarget::parse(&self.mac_arrow_up_mapping).unwrap_or(config.mac_arrow_up_mapping);
-        config.mac_arrow_down_mapping =
-            KeyTarget::parse(&self.mac_arrow_down_mapping).unwrap_or(config.mac_arrow_down_mapping);
-        config.auto_update_check = self.auto_update_check;
-    }
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }

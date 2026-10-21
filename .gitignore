@@ -7,3 +7,6 @@ gen/
 *.key
 mac-server.txt
 /test-results
+
+__pycache__/
+*.pyc
