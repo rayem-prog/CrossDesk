@@ -133,6 +133,8 @@ fn first_pairing_starts_both_services_and_the_next_launch_needs_no_code() {
     .unwrap();
     client.candidates = vec![candidate.clone()];
     client.command(Command::Select(candidate.id)).unwrap();
+    client.disconnect().unwrap();
+    // A new explicit Pair after cancellation is a fresh request to connect.
     client.command(Command::Pair(pin)).unwrap();
     let until = Instant::now() + Duration::from_secs(4);
     loop {

@@ -17,8 +17,8 @@ parser.add_argument('--output', type=Path, required=True)
 args = parser.parse_args()
 if not args.artifact.exists():
     parser.error('native app/installer does not exist')
-cargo = tomllib.loads((ROOT / 'Cargo.toml').read_text())
-config = json.loads((ROOT / 'tauri.conf.json').read_text())
+cargo = tomllib.loads((ROOT / 'Cargo.toml').read_text(encoding='utf-8'))
+config = json.loads((ROOT / 'tauri.conf.json').read_text(encoding='utf-8'))
 version = cargo['package']['version']
 assert config['productName'] == 'CrossDesk' and config['version'] == version
 assert {'pairing', 'discovery'}.issubset(cargo['features']['gui'])
@@ -78,7 +78,7 @@ with zipfile.ZipFile(archive_path, 'w', compresslevel=6) as archive:
     web = ROOT / 'web/node_modules'
     web_index = []
     for manifest in sorted(web.glob('*/package.json')) + sorted(web.glob('@*/*/package.json')):
-        package = json.loads(manifest.read_text())
+        package = json.loads(manifest.read_text(encoding='utf-8'))
         web_index.append(f'{package.get("name")}@{package.get("version")}: {package.get("license", "see notices")}')
     for path in sorted(web.rglob('*')):
         if path.is_file() and path.name.lower().startswith(('license', 'licence', 'notice', 'copying')):
@@ -94,5 +94,5 @@ with zipfile.ZipFile(archive_path) as archive:
     if args.platform == 'Mac-ARM64':
         assert archive.getinfo(f'{name}/CrossDesk.app/Contents/MacOS/crossdesk').external_attr >> 16 & 0o111
 checksum = hashlib.file_digest(archive_path.open('rb'), 'sha256').hexdigest()
-archive_path.with_suffix('.zip.sha256').write_text(f'{checksum}  {archive_path.name}\n')
+archive_path.with_suffix('.zip.sha256').write_text(f'{checksum}  {archive_path.name}\n', encoding='utf-8')
 print(f'{archive_path}: {archive_path.stat().st_size:,} bytes; source {commit}; SHA256 {checksum}')

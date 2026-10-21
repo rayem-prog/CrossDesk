@@ -42,11 +42,12 @@ impl PairJob {
                                         "已取消配对",
                                     ));
                                 }
-                                return crate::pairing::run_client(
+                                return crate::pairing::transport::run_client_cancellable(
                                     stream,
                                     candidate.id,
                                     &code,
                                     &store,
+                                    s.clone(),
                                 );
                             }
                             Err(e) => last = e,

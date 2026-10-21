@@ -1,5 +1,6 @@
 //! Noise NNpsk0 protects every protocol byte. The 256-bit pairing key is
 //! generated locally and copied to the second machine; it is never logged.
+use crate::socket::Socket;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
@@ -59,8 +60,8 @@ fn decode_key(text: &str) -> io::Result<[u8; 32]> {
 }
 
 pub struct SecureStream {
-    reader: TcpStream,
-    writer: Arc<Mutex<TcpStream>>,
+    reader: Socket,
+    writer: Arc<Mutex<Socket>>,
     cipher: Arc<Mutex<snow::TransportState>>,
     buffered: Vec<u8>,
     position: usize,
@@ -89,10 +90,14 @@ impl SecureStream {
         Self::handshake(stream, key, false)
     }
 
-    fn handshake(mut stream: TcpStream, key: &[u8; 32], initiator: bool) -> io::Result<Self> {
-        // Accepted sockets inherit a nonblocking Windows listener's mode.
-        // Record framing uses read_exact/write_all with bounded timeouts.
-        stream.set_nonblocking(false)?;
+    fn handshake(stream: TcpStream, key: &[u8; 32], initiator: bool) -> io::Result<Self> {
+        Self::handshake_socket(Socket::plain(stream)?, key, initiator)
+    }
+    pub(crate) fn handshake_socket(
+        mut stream: Socket,
+        key: &[u8; 32],
+        initiator: bool,
+    ) -> io::Result<Self> {
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(LIVENESS_TIMEOUT))?;
         stream.set_write_timeout(Some(Duration::from_secs(2)))?;

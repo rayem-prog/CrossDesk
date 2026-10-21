@@ -221,6 +221,8 @@ impl Core {
             "0.0.0.0:24921".parse().unwrap(),
             self.store.clone(),
         )?);
+        self.paused_by_user = false;
+        self.policy.manual_connect();
         self.announce();
         Ok(())
     }
@@ -500,6 +502,8 @@ impl Core {
                     .ok_or_else(|| io::Error::other("请先选择 Windows 设备"))?;
                 self.error = None;
                 self.job = Some(PairJob::start(candidate, code, self.store.clone())?);
+                self.paused_by_user = false;
+                self.policy.manual_connect();
             }
             Command::Connect => self.connect()?,
             Command::Disconnect => self.disconnect()?,

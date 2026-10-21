@@ -3,7 +3,7 @@ pub use window::PairingWindow;
 #[cfg(test)]
 mod tests;
 #[cfg(feature = "pairing")]
-mod transport;
+pub(crate) mod transport;
 #[cfg(feature = "pairing")]
 pub use transport::{run_client, run_host};
 #[cfg(feature = "pairing")]

@@ -1,4 +1,4 @@
-use super::{PairingWindow, run_host};
+use super::PairingWindow;
 use crate::trust_store::TrustedStore;
 use std::{
     io,
@@ -73,7 +73,12 @@ impl PairingService {
                                 }
                                 Err(_) => continue,
                             }
-                            let result = run_host(socket, &mut window, &store);
+                            let result = super::transport::run_host_cancellable(
+                                socket,
+                                &mut window,
+                                &store,
+                                s.clone(),
+                            );
                             a.lock().unwrap().take();
                             let mut view = v.lock().unwrap();
                             if result.is_ok() {

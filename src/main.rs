@@ -26,6 +26,7 @@ mod secure;
 mod server;
 mod service_event;
 mod shutdown;
+mod socket;
 mod transport;
 #[cfg(any(feature = "pairing", feature = "discovery"))]
 mod trust_store;

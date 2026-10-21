@@ -6,6 +6,7 @@ use spake2::{Ed25519Group, Identity, Password, Spake2};
 use std::{
     io::{self, Read, Write},
     net::TcpStream,
+    sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 const MAGIC: &[u8; 8] = b"CDPAIR01";
@@ -34,8 +35,7 @@ fn write_message(writer: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
     writer.write_all(bytes)?;
     writer.flush()
 }
-fn configure(s: &TcpStream) -> io::Result<()> {
-    s.set_nonblocking(false)?;
+fn configure(s: &crate::socket::Socket) -> io::Result<()> {
     s.set_nodelay(true)?;
     s.set_read_timeout(Some(Duration::from_secs(2)))?;
     s.set_write_timeout(Some(Duration::from_secs(2)))
@@ -72,10 +72,19 @@ fn bootstrap(
     Ok(key)
 }
 pub fn run_host(
-    mut socket: TcpStream,
+    socket: TcpStream,
     window: &mut PairingWindow,
     store: &TrustedStore,
 ) -> io::Result<()> {
+    run_host_cancellable(socket, window, store, Arc::new(AtomicBool::new(false)))
+}
+pub fn run_host_cancellable(
+    socket: TcpStream,
+    window: &mut PairingWindow,
+    store: &TrustedStore,
+    stop: Arc<AtomicBool>,
+) -> io::Result<()> {
+    let mut socket = crate::socket::Socket::pairing(socket, stop)?;
     if !window.admit(Instant::now()) {
         return Err(bad());
     }
@@ -105,7 +114,7 @@ pub fn run_host(
         write_message(&mut socket, &b)?;
         let mut key = bootstrap(&shared, &hello, &client, &a, &b)?;
         shared.fill(0);
-        let channel = crate::secure::from_tcp(socket, &key, false);
+        let channel = crate::secure::SecureStream::handshake_socket(socket, &key, false);
         key.fill(0);
         let mut channel = channel.map_err(|_| bad())?;
         if !window.open(Instant::now()) || start.elapsed() > Duration::from_secs(10) {
@@ -140,11 +149,27 @@ pub fn run_host(
     result
 }
 pub fn run_client(
-    mut socket: TcpStream,
+    socket: TcpStream,
     expected_host: DeviceId,
     code: &[u8; 6],
     store: &TrustedStore,
 ) -> io::Result<()> {
+    run_client_cancellable(
+        socket,
+        expected_host,
+        code,
+        store,
+        Arc::new(AtomicBool::new(false)),
+    )
+}
+pub fn run_client_cancellable(
+    socket: TcpStream,
+    expected_host: DeviceId,
+    code: &[u8; 6],
+    store: &TrustedStore,
+    stop: Arc<AtomicBool>,
+) -> io::Result<()> {
+    let mut socket = crate::socket::Socket::pairing(socket, stop)?;
     if !code.iter().all(u8::is_ascii_digit) {
         return Err(bad());
     }
@@ -166,7 +191,7 @@ pub fn run_client(
     let mut shared = state.finish(&b).map_err(|_| bad())?;
     let mut key = bootstrap(&shared, &hello, &client, &a, &b)?;
     shared.fill(0);
-    let channel = crate::secure::from_tcp(socket, &key, true);
+    let channel = crate::secure::SecureStream::handshake_socket(socket, &key, true);
     key.fill(0);
     let mut channel = channel.map_err(|_| bad())?;
     let mut grant = read_message(&mut channel)?;
