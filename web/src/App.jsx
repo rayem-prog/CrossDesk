@@ -13,5 +13,5 @@ export function App({api=invoke,refreshMs=600,preview=false}){
  {preview&&<div className="preview-banner">界面预览 · 演示数据</div>}
  <main><ConnectHome view={view} busy={busy||view.busy} onSelect={id=>action('select_device',{id})} onPair={code=>action('pair_device',{code})} onConnect={()=>action('connect_device')} onDisconnect={()=>action('disconnect_device')} onRefresh={()=>action('refresh_devices')}/>
  {message&&<div className="error-banner" role="alert"><AlertCircle size={17}/><div><strong>{message}</strong>{view.platform==='macos'&&/权限|permission|Accessibility|accessibility/i.test(message)&&<button className="text-button" onClick={()=>action('open_permissions')}>打开辅助功能设置<ExternalLink size={12}/></button>}</div></div>}
- </main><footer className="app-footer"><span className="local-badge"><span/>局域网直连</span><span>Windows ↔ Mac · v{view.appVersion}</span></footer></div>{settings&&<AdvancedSettings view={view} onClose={closeSettings} onAction={action}/>}</>;
+ </main><footer className="app-footer"><span className="local-badge"><span/>局域网直连</span><span>Windows ↔ Mac · v{view.appVersion}</span></footer></div>{settings&&<AdvancedSettings view={{...view,error:message}} onClose={closeSettings} onAction={action}/>}</>;
 }

@@ -60,7 +60,13 @@ impl PairingService {
                         Ok((socket, _)) => {
                             match socket.try_clone() {
                                 Ok(clone) => {
-                                    *a.lock().unwrap() = Some(Active {
+                                    let mut active = a.lock().unwrap();
+                                    // stop() uses this same lock: a socket accepted during
+                                    // cancellation must never enter a blocking handshake.
+                                    if s.load(Ordering::Acquire) {
+                                        break;
+                                    }
+                                    *active = Some(Active {
                                         socket: clone,
                                         deadline: Instant::now() + Duration::from_secs(10),
                                     })

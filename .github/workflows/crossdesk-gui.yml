@@ -2,6 +2,7 @@ name: CrossDesk GUI builds
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     paths: ['src/**', 'web/**', 'scripts/**', 'packaging/**', 'capabilities/**', 'tauri.conf.json', '*.md', 'Cargo.*', 'build.rs', '.github/workflows/crossdesk-gui.yml']
   pull_request:
     paths: ['src/**', 'web/**', 'scripts/**', 'packaging/**', 'capabilities/**', 'tauri.conf.json', '*.md', 'Cargo.*', 'build.rs', '.github/workflows/crossdesk-gui.yml']
@@ -31,6 +32,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: gui-${{ matrix.platform }}
+          cache-on-failure: true
       - run: npm --prefix web ci
       - run: npm --prefix web test
       - run: npm --prefix web run build

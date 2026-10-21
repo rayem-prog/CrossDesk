@@ -4,9 +4,9 @@
 
 Local host: Apple Silicon macOS, Rust 1.98.1, Node.js 24.21.0.
 
-- GUI Rust suite: **99 passing / 2 intentionally ignored** after the explicit-pair preference regression. The ignored subprocess fixture is run by its parent lifecycle tests; the large acceptance is run explicitly in release mode.
+- GUI Rust suite: **100 passing / 2 intentionally ignored** after the explicit-pair preference regression. The ignored subprocess fixture is run by its parent lifecycle tests; the large acceptance is run explicitly in release mode.
 - CLI-only suite: **79 passing / 1 large acceptance ignored**. Existing v6 data protocol and command-line options remain usable.
-- Six React / Testing Library tests cover a normal flow without IP/key forms, leading-zero codes, busy cancellation, manual reconnect, polling that preserves typed codes and persistent action errors. Production Vite build passes; npm audit reports zero vulnerabilities in the locked dependency set at validation time.
+- Seven React / Testing Library tests cover a normal flow without IP/key forms, leading-zero codes, busy cancellation, manual reconnect, polling that preserves typed codes and persistent action errors. Production Vite build passes; npm audit reports zero vulnerabilities in the locked dependency set at validation time.
 - A real encrypted TCP pairing test gives host/client the same durable long-term key. Wrong-code and malformed-frame tests reject unauthenticated pairing. Window tests cover expiration, attempt exhaustion and admission concurrency; service shutdown closes its real loopback listener and an idle accepted socket.
 - Controller integration runs both first-use roles with actual PAKE/Noise pairing and real temporary storage. Only the input-service boundary is replaced; subsequent startup requires no code. Other tests cover manual disconnect winning a completion race, pending authenticated-grant recovery after a lost final acknowledgment, multi-address retry, persistent preferences and removal of expired pairing advertisements.
 - Backend tests spawn the actual test executable as a child, consume structured events, stop/reap it repeatedly, and prove that human log text and late events from an exited process cannot produce a connected state.
@@ -15,7 +15,7 @@ Local host: Apple Silicon macOS, Rust 1.98.1, Node.js 24.21.0.
 
 ## Release build record
 
-Native Mac `.app` bundling, signature verification, archive checks and Windows/MSVC CI results are added here as they complete. Build and test logs are retained in the task workspace. The app is not launched against the user's devices during validation. No test modifies the user's general clipboard; macOS clipboard tests use named pasteboards and Windows clipboard tests run only on disposable CI runners.
+Native Mac ARM64 release `.app` build passes. The full source-inclusive ZIP is approximately 41 MB. Ad-hoc signing and `codesign --verify --deep --strict` pass, including after ZIP extraction with restored executable permissions. Extracted `crossdesk --version` returns 0.4.0 without launching GUI or touching devices. ZIP CRC, matching source commit, dependency notices, executable mode, pairing-data exclusion and external SHA-256 manifest checks pass. The explicit release-mode 129 MiB encrypted streaming test passes. Native Windows/MSVC CI results are recorded below when complete. Build and test logs are retained in the task workspace. The app is not launched against the user's devices during validation. No test modifies the user's general clipboard; macOS clipboard tests use named pasteboards and Windows clipboard tests run only on disposable CI runners.
 
 ## Implementation decisions and limits
 
@@ -103,3 +103,8 @@ Windows cross link uses `CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=<Rust rust-ll
 The implementation is uploaded to `codex/file-clipboard` with [draft PR #1](https://github.com/rayem-prog/CrossDesk/pull/1); it has not been merged or published as a GitHub Release. Push and pull-request workflows run native Windows/MSVC and Mac/ARM64 tests, the explicit disposable Windows clipboard test, release builds, the 129 MiB transfer acceptance test, and source-inclusive packaging.
 
 The first Windows run exposed an invalid cancellation-test assumption: `DirEntry::metadata` uses cached directory enumeration data on Windows, so its file size could remain zero until the receive handle closed at commit. The test now reads metadata from an open file handle to cancel during transfer, and also checks that only the retry reaches completed delivery. The unchanged receiver cleanup remains covered by the same cache-directory assertion. See [Rust DirEntry platform behavior](https://doc.rust-lang.org/std/fs/struct.DirEntry.html#method.metadata) and [Microsoft NTFS enumeration caveat](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfilea).
+
+
+### 0.4.0 native CI investigation
+
+The initial GUI Windows run compiled successfully and passed 89 tests, but idle pairing cancellation exceeded its one-second regression bound. The accept worker could publish a socket after stop had already inspected the active slot; admission is now checked under that same lock before starting a handshake. Tests wait for actual acceptance rather than assuming a 100 ms sleep was sufficient, and also repeatedly stop immediately at acceptance. The one-second stop bound and port-release assertions remain unchanged. The next native CI run verifies this fix. The CLI-native workflow already passed both Windows/MSVC and Mac/ARM64 on the initial implementation commit ([run](https://github.com/rayem-prog/CrossDesk/actions/runs/39559395748)).

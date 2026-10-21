@@ -19,3 +19,9 @@ test('a failed pairing action remains readable across background refreshes',asyn
  await waitFor(()=>expect(api.mock.calls.filter(c=>c[0]==='get_connect_state').length).toBeGreaterThan(3));
  expect(screen.getByRole('alert').textContent).toContain('配对码已失效');
 });
+test('a settings action failure stays visible inside the open dialog',async()=>{
+ const api=vi.fn(async name=>{if(name==='set_options')throw new Error('设置文件不可写');return {...view,state:'paused'};});render(<App api={api} refreshMs={25}/>);
+ await screen.findByLabelText('配对码');await userEvent.click(screen.getByRole('button',{name:'高级设置'}));
+ await userEvent.click(screen.getByRole('button',{name:'保存设置'}));
+ await waitFor(()=>expect(screen.getByRole('dialog').textContent).toContain('设置文件不可写'));
+});
