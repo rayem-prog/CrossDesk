@@ -12,6 +12,7 @@ mod image_transfer;
 mod input;
 #[cfg(target_os = "linux")]
 mod linux;
+mod pairing;
 mod platform;
 mod pointer;
 mod protocol;
@@ -19,6 +20,7 @@ mod secure;
 mod server;
 mod shutdown;
 mod transport;
+mod trust_store;
 
 use std::{env, path::PathBuf, process::ExitCode};
 

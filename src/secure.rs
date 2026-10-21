@@ -35,8 +35,11 @@ pub fn generate_key(path: &Path) -> io::Result<()> {
 }
 
 pub fn load_key() -> io::Result<[u8; 32]> {
-    let path = key_path()?;
-    let text = fs::read_to_string(&path).map_err(|e| io::Error::new(e.kind(), format!("Cannot read pairing key {}. Run crossdesk keygen and copy the same key file to the Mac. ({e})", path.display())))?;
+    load_key_from(&key_path()?)
+}
+
+pub fn load_key_from(path: &Path) -> io::Result<[u8; 32]> {
+    let text = fs::read_to_string(path).map_err(|e| io::Error::new(e.kind(), format!("Cannot read pairing key {}. Run crossdesk keygen and copy the same key file to the Mac. ({e})", path.display())))?;
     decode_key(text.trim())
 }
 
@@ -61,6 +64,10 @@ pub struct SecureStream {
     cipher: Arc<Mutex<snow::TransportState>>,
     buffered: Vec<u8>,
     position: usize,
+}
+
+pub fn from_tcp(stream: TcpStream, key: &[u8; 32], initiator: bool) -> io::Result<SecureStream> {
+    SecureStream::handshake(stream, key, initiator)
 }
 
 impl SecureStream {
