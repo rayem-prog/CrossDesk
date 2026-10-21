@@ -1,6 +1,8 @@
 // CrossDesk automatic pairing store, 2026-10-21. GPL-3.0-only.
+#[cfg(unix)]
+use std::fs::File;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
     sync::Mutex,

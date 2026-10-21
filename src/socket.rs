@@ -110,13 +110,20 @@ mod tests {
     #[test]
     fn cancellation_interrupts_a_noise_handshake_without_socket_shutdown() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let _idle = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (stream, _) = listener.accept().unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let socket = Socket::pairing(stream, stop.clone()).unwrap();
         let worker = thread::spawn(move || {
-            crate::secure::SecureStream::handshake_socket(socket, &[8; 32], false)
+            crate::secure::SecureStream::handshake_socket(socket, &[8; 32], true)
         });
+        // Observe the first Noise packet on the wire before cancelling its pending response.
+        let mut header = [0; 2];
+        peer.read_exact(&mut header).unwrap();
+        let mut hello = vec![0; u16::from_be_bytes(header) as usize];
+        peer.read_exact(&mut hello).unwrap();
+        assert!(!hello.is_empty());
         stop.store(true, Ordering::Release);
         let start = Instant::now();
         match worker.join().unwrap() {

@@ -8,6 +8,7 @@ import stat
 import subprocess
 import tomllib
 import zipfile
+from package_sources import source_changes
 
 ROOT = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
@@ -22,7 +23,7 @@ config = json.loads((ROOT / 'tauri.conf.json').read_text(encoding='utf-8'))
 version = cargo['package']['version']
 assert config['productName'] == 'CrossDesk' and config['version'] == version
 assert {'pairing', 'discovery'}.issubset(cargo['features']['gui'])
-subprocess.run(['git', 'diff', '--exit-code', 'HEAD', '--'], cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
+build_patch = source_changes(ROOT)
 name = f'CrossDesk-{version}-{args.platform}-GUI'
 args.output.mkdir(parents=True, exist_ok=True)
 archive_path = args.output / f'{name}.zip'
@@ -85,7 +86,10 @@ with zipfile.ZipFile(archive_path, 'w', compresslevel=6) as archive:
             add(archive, path, f'web-licenses/{path.relative_to(web).as_posix()}')
     archive.writestr(f'{name}/WEB_DEPENDENCIES.txt', '\n'.join(web_index) + '\n')
     archive.writestr(f'{name}/THIRD_PARTY_SOURCES.txt', '\n'.join(dependencies) + '\n')
-    archive.writestr(f'{name}/COMMIT.txt', f'CrossDesk {version}\nSource commit: {commit}\nBuild: --locked --features gui\n')
+    changes = 'Build rewrites: BUILD_CHANGES.patch (source/ contains actual build inputs)\n' if build_patch else ''
+    if build_patch:
+        archive.writestr(f'{name}/BUILD_CHANGES.patch', build_patch)
+    archive.writestr(f'{name}/COMMIT.txt', f'CrossDesk {version}\nSource base commit: {commit}\n{changes}Build: --locked --features gui\n')
 with zipfile.ZipFile(archive_path) as archive:
     assert archive.testzip() is None
     assert not any(n.endswith('.key') and '/third-party-source/' not in n for n in archive.namelist())
