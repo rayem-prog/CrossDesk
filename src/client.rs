@@ -1,7 +1,5 @@
 // CrossDesk image clipboard changes: 2026-10-20 (GPL-3.0-only).
 use crate::secure::SecureStream;
-use std::net::Shutdown;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -30,7 +28,13 @@ pub fn run(server: &str) -> std::io::Result<()> {
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
                 return Err(error);
             }
-            Err(error) => eprintln!("Disconnected: {error}. Retrying in one second; Ctrl+C exits."),
+            Err(error) => {
+                crate::service_event::emit(
+                    crate::service_event::ServiceState::Retrying,
+                    Some(error.to_string()),
+                );
+                eprintln!("Disconnected: {error}. Retrying in one second; Ctrl+C exits.");
+            }
         }
         thread::sleep(Duration::from_secs(1));
     }
@@ -38,17 +42,12 @@ pub fn run(server: &str) -> std::io::Result<()> {
 }
 
 fn run_session(server: &str, key: &[u8; 32]) -> std::io::Result<()> {
+    crate::service_event::emit(crate::service_event::ServiceState::Connecting, None);
     eprintln!("connecting to {server}");
     let mut stream = SecureStream::connect(server, key)?;
     stream.set_nodelay(true)?;
     let writer = SharedWriter::new(stream.try_clone()?);
-    let stop_requested = Arc::new(AtomicBool::new(false));
-    let stop_stream = stream.try_clone()?;
-    let stop_flag = Arc::clone(&stop_requested);
-    crate::shutdown::spawn_gui_stop_watcher(move || {
-        stop_flag.store(true, Ordering::Release);
-        let _ = stop_stream.shutdown(Shutdown::Both);
-    });
+    let _transport = crate::shutdown::register_transport(&stream)?;
     eprintln!("connected; waiting for server hello");
     let server_hello = protocol::read_frame(&mut stream)?;
     if server_hello.kind != FrameKind::Hello {
@@ -91,6 +90,7 @@ fn run_session(server: &str, key: &[u8; 32]) -> std::io::Result<()> {
         spawn_clipboard_watcher(writer.clone(), Arc::clone(&clipboard_state));
     }
     let mut input_log = InputLog::new();
+    crate::service_event::emit(crate::service_event::ServiceState::Connected, None);
 
     loop {
         if crate::shutdown::requested() {
@@ -98,7 +98,7 @@ fn run_session(server: &str, key: &[u8; 32]) -> std::io::Result<()> {
         }
         let frame = match protocol::read_frame(&mut stream) {
             Ok(frame) => frame,
-            Err(_) if stop_requested.load(Ordering::Acquire) => return Ok(()),
+            Err(_) if crate::shutdown::requested() => return Ok(()),
             Err(e) => return Err(e),
         };
         if ClipboardSession::handles(frame.kind) {

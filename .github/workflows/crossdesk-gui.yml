@@ -1,0 +1,61 @@
+name: CrossDesk GUI builds
+on:
+  workflow_dispatch:
+  push:
+    paths: ['src/**', 'web/**', 'scripts/**', 'packaging/**', 'capabilities/**', 'tauri.conf.json', '*.md', 'Cargo.*', 'build.rs', '.github/workflows/crossdesk-gui.yml']
+  pull_request:
+    paths: ['src/**', 'web/**', 'scripts/**', 'packaging/**', 'capabilities/**', 'tauri.conf.json', '*.md', 'Cargo.*', 'build.rs', '.github/workflows/crossdesk-gui.yml']
+jobs:
+  native-gui:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: Windows-x64
+            bundle: nsis
+          - os: macos-latest
+            platform: Mac-ARM64
+            bundle: app
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gui-${{ matrix.platform }}
+      - run: npm --prefix web ci
+      - run: npm --prefix web test
+      - run: npm --prefix web run build
+      - run: cargo fmt --check
+      - run: cargo test --locked --features gui
+      - name: Native Windows clipboard on disposable runner
+        if: runner.os == 'Windows'
+        run: cargo test --locked --features gui native_windows_image_and_file_clipboard_round_trip -- --ignored
+      - name: Large encrypted file transfer
+        run: cargo test --release --locked --features gui large_file_stream_exceeds_image_batch_limit_without_buffering_the_file -- --ignored
+      - name: Build native app or installer
+        run: node web/node_modules/@tauri-apps/cli/tauri.js build --features gui --bundles ${{ matrix.bundle }}
+      - name: Verify Mac signature and package
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --deep --sign - target/release/bundle/macos/CrossDesk.app
+          codesign --verify --deep --strict target/release/bundle/macos/CrossDesk.app
+          python3 scripts/package_gui.py --artifact target/release/bundle/macos/CrossDesk.app --platform Mac-ARM64 --output dist/gui
+      - name: Package Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem target/release/bundle/nsis/*.exe | Select-Object -First 1
+          python scripts/package_gui.py --artifact $installer.FullName --platform Windows-x64 --output dist/gui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CrossDesk-${{ matrix.platform }}-GUI
+          path: dist/gui/*

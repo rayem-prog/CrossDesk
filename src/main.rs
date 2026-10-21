@@ -1,10 +1,15 @@
 // CrossDesk image clipboard changes: 2026-10-20 (GPL-3.0-only).
 #![allow(dead_code)]
+#![cfg_attr(all(windows, feature = "gui"), windows_subsystem = "windows")]
 mod client;
 mod clipboard;
 mod config;
 mod control;
 mod desktop;
+#[cfg(feature = "discovery")]
+mod discovery;
+#[cfg(feature = "gui")]
+mod easy_connect;
 mod file_transfer;
 #[cfg(feature = "gui")]
 mod gui;
@@ -12,14 +17,17 @@ mod image_transfer;
 mod input;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(feature = "pairing")]
 mod pairing;
 mod platform;
 mod pointer;
 mod protocol;
 mod secure;
 mod server;
+mod service_event;
 mod shutdown;
 mod transport;
+#[cfg(any(feature = "pairing", feature = "discovery"))]
 mod trust_store;
 
 use std::{env, path::PathBuf, process::ExitCode};
@@ -34,7 +42,9 @@ enum Command {
 
 fn main() -> ExitCode {
     let args: Vec<_> = env::args().skip(1).collect();
-    if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
+    if (args.is_empty() && !cfg!(feature = "gui"))
+        || args.iter().any(|a| a == "--help" || a == "-h")
+    {
         print_usage();
         return ExitCode::SUCCESS;
     }
@@ -42,7 +52,7 @@ fn main() -> ExitCode {
         println!("CrossDesk {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
     }
-    let command = match parse_args(&args) {
+    let command = match choose_command(&args) {
         Ok(command) => command,
         Err(error) => {
             eprintln!("{error}");
@@ -70,6 +80,9 @@ fn main() -> ExitCode {
         eprintln!("Cannot install shutdown handler: {error}");
         return ExitCode::FAILURE;
     }
+    if matches!(&command, Command::Server { .. } | Command::Client { .. }) {
+        shutdown::spawn_gui_stop_watcher();
+    }
     let result = match command {
         Command::Keygen { output } => secure::generate_key(&output).map(|()| {
             println!("Created pairing key: {}\nCopy this same file to the Mac, beside its CrossDesk executable.", output.display());
@@ -86,10 +99,18 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
+            service_event::emit(service_event::ServiceState::Error, Some(error.to_string()));
             eprintln!("error: {error}");
             ExitCode::FAILURE
         }
     }
+}
+
+fn choose_command(args: &[String]) -> Result<Command, String> {
+    if args.is_empty() && cfg!(feature = "gui") {
+        return Ok(Command::Gui);
+    }
+    parse_args(args)
 }
 
 fn parse_args(args: &[String]) -> Result<Command, String> {
@@ -217,5 +238,22 @@ mod file_option_tests {
         assert!(parse("server --file-clipboard off").is_ok());
         assert!(parse("client --server 127.0.0.1:24920 --file-clipboard on").is_ok());
         assert!(parse("server --file-clipboard maybe").is_err());
+    }
+}
+#[cfg(test)]
+mod easy_entry_tests {
+    use super::*;
+    #[test]
+    fn no_argument_gui_build_opens_window_while_explicit_commands_stay_commands() {
+        let empty: Vec<String> = Vec::new();
+        if cfg!(feature = "gui") {
+            assert!(matches!(choose_command(&empty).unwrap(), Command::Gui));
+        } else {
+            assert!(choose_command(&empty).is_err());
+        }
+        assert!(matches!(
+            choose_command(&["server".into()]).unwrap(),
+            Command::Server { .. }
+        ));
     }
 }

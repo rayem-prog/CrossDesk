@@ -1,37 +1,44 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Deskbridge",
-  "version": "1.6.9",
-  "identifier": "local.deskbridge.app",
+  "productName": "CrossDesk",
+  "version": "0.4.0",
+  "identifier": "local.crossdesk.app",
   "build": {
-    "beforeDevCommand": "cd web && npm run dev -- --host 127.0.0.1 --port 1420",
-    "beforeBuildCommand": "cd web && npm run build",
+    "beforeDevCommand": "npm run dev -- --host 127.0.0.1 --port 1420",
+    "beforeBuildCommand": "npm run build",
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "web/dist"
   },
   "app": {
     "windows": [
       {
-        "title": "Deskbridge",
-        "width": 880,
-        "height": 600,
+        "title": "CrossDesk",
+        "width": 640,
+        "height": 790,
         "minWidth": 380,
-        "minHeight": 520,
+        "minHeight": 640,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "label": "main"
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data:; connect-src ipc: http://ipc.localhost https://ipc.localhost"
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "app",
+      "nsis"
+    ],
     "icon": [
       "assets/deskbridge.png",
       "assets/deskbridge.icns",
       "assets/deskbridge.ico"
-    ]
+    ],
+    "macOS": {
+      "infoPlist": "packaging/macos/Info.plist"
+    }
   }
 }

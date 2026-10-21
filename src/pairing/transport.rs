@@ -112,6 +112,7 @@ pub fn run_host(
             return Err(bad());
         }
         let mut long_term = store.host_key()?;
+        store.stage(client, &long_term)?;
         let mut grant = vec![1];
         grant.extend_from_slice(&host);
         grant.extend_from_slice(&client);

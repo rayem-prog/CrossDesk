@@ -98,6 +98,7 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
     );
     eprintln!("Waiting for the Mac with the matching pairing key. Ctrl+C exits.");
     while !crate::shutdown::requested() {
+        crate::service_event::emit(crate::service_event::ServiceState::Listening, None);
         let (socket, address) = match listener.accept() {
             Ok(peer) => peer,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -150,6 +151,7 @@ fn run_session(
     images_enabled: bool,
     files_enabled: bool,
 ) -> std::io::Result<()> {
+    let _transport = crate::shutdown::register_transport(&stream)?;
     let stop_stream = stream.try_clone()?;
     let remote_profile = ConnectionProfile::local_server(client_platform);
     eprintln!(
@@ -212,9 +214,6 @@ fn run_session(
     if !images_enabled && !files_enabled {
         spawn_clipboard_watcher(writer, clipboard_state);
     }
-    crate::shutdown::spawn_gui_stop_watcher(move || unsafe {
-        PostMessageW(stop_window as HWND, WM_DESKBRIDGE_STOP, 0, 0);
-    });
     eprintln!("raw mouse input registered for relative movement");
     eprintln!(
         "input hooks installed; move the mouse through the configured edge to control the client"
@@ -222,6 +221,7 @@ fn run_session(
     if drop_strip.is_some() {
         eprintln!("file drop strip active on the {:?} edge", config.edge);
     }
+    crate::service_event::emit(crate::service_event::ServiceState::Connected, None);
     message_loop();
     CONNECTION_ALIVE.store(false, Ordering::Release);
     STOP_WINDOW.store(0, Ordering::Release);

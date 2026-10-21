@@ -9,4 +9,4 @@ pub use transport::{run_client, run_host};
 #[cfg(feature = "pairing")]
 mod service;
 #[cfg(feature = "pairing")]
-pub use service::{PairingService, PairingView};
+pub use service::PairingService;

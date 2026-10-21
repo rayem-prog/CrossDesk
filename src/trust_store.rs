@@ -83,6 +83,27 @@ impl TrustedStore {
             lock: Mutex::new(()),
         })
     }
+    pub fn forget(&self) -> io::Result<()> {
+        let _lock = self
+            .lock
+            .lock()
+            .map_err(|_| io::Error::other("store lock poisoned"))?;
+        for name in ["trusted", "pending"] {
+            let path = self.root.join(name);
+            match fs::symlink_metadata(&path) {
+                Ok(m) if m.is_dir() && !m.file_type().is_symlink() => fs::remove_dir_all(path)?,
+                Ok(_) => return Err(invalid("invalid private directory")),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        match fs::remove_file(self.host_key_path()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        Ok(())
+    }
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -143,6 +164,50 @@ impl TrustedStore {
         crate::secure::load_key_from(&key_path)?;
         Ok(Some(StoredPeer { id, key_path }))
     }
+    fn pending_inner(&self) -> io::Result<Option<StoredPeer>> {
+        let directory = self.root.join("pending");
+        match fs::symlink_metadata(&directory) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+            Ok(m) if !m.is_dir() || m.file_type().is_symlink() => {
+                return Err(invalid("invalid pending directory"));
+            }
+            _ => {}
+        }
+        let mut entries = fs::read_dir(&directory)?;
+        let Some(entry) = entries.next().transpose()? else {
+            return Ok(None);
+        };
+        if entries.next().is_some() {
+            return Err(invalid("multiple pending pairings"));
+        }
+        let id = parse_id(
+            entry
+                .file_name()
+                .to_str()
+                .ok_or_else(|| invalid("invalid pending identity"))?,
+        )?;
+        let path = entry.path();
+        let m = fs::symlink_metadata(&path)?;
+        if !m.is_dir() || m.file_type().is_symlink() {
+            return Err(invalid("invalid pending directory"));
+        }
+        checked_file(&path.join("peer-id"))?;
+        if parse_id(fs::read_to_string(path.join("peer-id"))?.trim())? != id {
+            return Err(invalid("pending identity mismatch"));
+        }
+        let key_path = path.join("peer.key");
+        checked_file(&key_path)?;
+        crate::secure::load_key_from(&key_path)?;
+        Ok(Some(StoredPeer { id, key_path }))
+    }
+    pub fn pending(&self) -> io::Result<Option<StoredPeer>> {
+        let _lock = self
+            .lock
+            .lock()
+            .map_err(|_| io::Error::other("store lock poisoned"))?;
+        self.pending_inner()
+    }
     pub fn paired(&self) -> io::Result<Option<StoredPeer>> {
         let _lock = self
             .lock
@@ -164,23 +229,36 @@ impl TrustedStore {
                 "another pairing already exists; forget it before replacing",
             ));
         }
+        if let Some(old) = self.pending_inner()? {
+            if old.id == id && crate::secure::load_key_from(&old.key_path)? == *key {
+                return Ok(());
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "another pairing is pending; forget it before replacing",
+            ));
+        }
         let pending = self.root.join("pending");
         private_dir(&pending)?;
-        let dir = pending.join(hex(&id));
-        private_dir(&dir)?;
-        for (name, bytes) in [("peer-id", hex(&id)), ("peer.key", hex(key))] {
-            let path = dir.join(name);
-            match create_atomic(&path, bytes.as_bytes()) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                    checked_file(&path)?;
-                    if fs::read(&path)? != bytes.as_bytes() {
-                        return Err(invalid("pending pairing does not match"));
-                    }
-                }
-                Err(e) => return Err(e),
-            }
+        let mut random = [0; 16];
+        getrandom::getrandom(&mut random).map_err(|e| io::Error::other(e.to_string()))?;
+        let temp = self.root.join(format!(".staging-{}", hex(&random)));
+        private_dir(&temp)?;
+        let result: io::Result<()> = (|| {
+            create_atomic(&temp.join("peer-id"), hex(&id).as_bytes())?;
+            create_atomic(&temp.join("peer.key"), hex(key).as_bytes())?;
+            #[cfg(unix)]
+            File::open(&temp)?.sync_all()?;
+            fs::rename(&temp, pending.join(hex(&id)))?;
+            #[cfg(unix)]
+            File::open(&pending)?.sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(temp);
         }
+        result?;
+
         Ok(())
     }
     pub fn commit(&self, id: DeviceId) -> io::Result<()> {

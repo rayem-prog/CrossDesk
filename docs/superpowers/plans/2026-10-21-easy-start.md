@@ -163,3 +163,10 @@ npm --prefix web run build
 主路径中没有 IP/端口/文件路径表单，没有脚本和手动服务步骤；配对只做一次，后续连接与传输开关自动恢复。旧 GUI 计划中的手动配置不得作为本次完成标准。
 
 执行可选子代理逐项实施并审查，或当前会话顺序实施。当前尚未启动实现；开始时先建立失败测试，再按三个子项目依次提交、验证。
+
+
+## Execution record — 2026-10-21
+
+Implementation is in `codex/easy-connect`. Pairing/store/discovery/policy/controller/process and UI regression tests are implemented and run locally. Production orchestration is `src/easy_connect/mod.rs` plus its actor, not the initially proposed controller.rs; test doubles replace network/OS/process boundaries only. Pairing uses real loopback transport and service tests rather than adding pair-host/pair-client CLI commands. Authenticated pending grants can recover a lost final acknowledgment through the existing v6 data channel. Manual disconnect remains authoritative.
+
+Local GUI bundle, native CI and final package verification are recorded in `VALIDATION.md`. Physical Windows/Mac discovery, OS prompts and actual Finder/Explorer paste remain acceptance work on the two computers; browser preview and loopback tests do not substitute for those checks. Checkboxes above retain the original task breakdown instead of marking unrun hardware acceptance complete.

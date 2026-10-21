@@ -1,34 +1,35 @@
-# CrossDesk 0.3.0 — Windows / Mac 键鼠、图片与文件共享
+# CrossDesk 0.4.0 — 打开两端，复制粘贴
 
-Windows 11 控制 Apple Silicon Mac，图片和普通文件支持双向复制粘贴。基于 [Deskbridge 1.6.9](https://github.com/paulhe666/deskbridge)，使用 GPL v3。
+Windows 与 Apple Silicon Mac 共享键鼠，双向复制图片和普通文件。基于 [Deskbridge](https://github.com/paulhe666/deskbridge)，保留 GPL v3。
 
-## 安装与连接
+## 开始使用
 
-**两台电脑都更新到 0.3.0 / 协议 v6**。0.2.0 / v5 和更早版本无法连接；已有 `crossdesk.key` 可以继续使用。
+**第一次：** Windows 安装并打开 CrossDesk，Mac 将 `CrossDesk.app` 拖入“应用程序”后打开。在 Mac 上选择发现的 Windows，输入 Windows 窗口中的六位配对码，点击“配对并连接”。
 
-1. Windows 解压完整 Windows x64 包，双击 `Start Windows.cmd`。首次启动生成配对文件 `crossdesk.key`，窗口列出 Windows 局域网地址。
-2. Mac 解压完整 Mac ARM64 包，将 Windows 的同一份 `crossdesk.key` 放在 `Start Mac.command` 旁。不要上传或公开此文件。
-3. Mac 双击 `Start Mac.command`，输入 Windows 局域网 IP。预编译包不需要安装 Rust。
-4. Mac 在“系统设置 → 隐私与安全性 → 辅助功能”允许启动程序的 Terminal / CrossDesk，按提示重启程序。
-5. 两台电脑连接同一局域网；Windows 防火墙提示时允许使用的专用网络，端口 TCP 24920。
+**以后：** 两台电脑打开 CrossDesk，自动连接；看到“可以开始复制粘贴”，就能直接复制截图、图片或文件，在另一台粘贴。默认开启图片与文件同步。不需要终端、IP 地址或搬运密钥文件。
 
-Mac 提示未验证开发者时，使用系统“隐私与安全性”提供的允许打开方式。双击裸 `crossdesk` 只显示帮助，请使用启动脚本。解压未保留权限时，在 Mac 包目录运行：
+- 两端使用 0.4.0 GUI 应用，并连接同一局域网。Windows 为键鼠服务端，Mac 为客户端；文件/图片传输双向。
+- Mac 首次使用需要允许“本地网络”和“系统设置 → 隐私与安全性 → 辅助功能”中的 CrossDesk。授权后点击“连接设备”，必要时重新打开应用。
+- Windows 首次防火墙提示时允许当前使用的专用网络。访客 Wi-Fi / AP 隔离可能阻止设备互相发现。
+- 配对码 120 秒有效；失效后 Windows 点击“重新生成配对码”。错误码不会建立信任。首次配对成功后不用再次输入。
+- 点击“断开连接”后，本次运行保持断开；点击“连接设备”恢复。关闭应用会停止服务和发现，不在后台常驻。
+- 设置按钮中可关闭自动连接、图片或文件同步，查看日志，或忘记设备后重新配对。修改同步选项前先断开。
+
+这些构建尚无可信发布签名 / Apple 公证。Mac 若提示未验证开发者，请按系统“隐私与安全性”的允许打开流程处理；不要关闭系统安全防护。Windows 安装程序可能显示 SmartScreen 提示。开发者本地构建与 CI 安装包不等于正式 GitHub Release。
+
+## 发现失败与旧版迁移
+
+先检查两端已打开、网络相同、本地网络/防火墙权限已允许，然后刷新。仍失败时可在“高级设置 → 手动连接与旧版迁移”中指定 Windows IP 和旧版 `crossdesk.key`。已有其他配对时需先忘记设备；新 GUI 配对材料自动存入每用户应用数据目录，不放在安装目录。
+
+局域网发现使用 mDNS UDP 5353，临时配对使用 TCP 24921，数据使用原有 TCP 24920 / 协议 v6。公告只提供设备地址，不构成信任；六位码通过 SPAKE2、HKDF 和 Noise 确认后交付随机长期密钥。采用的 RustCrypto SPAKE2 库说明其实现未经独立安全审计，本项目也不声称已审计。只支持一组 Windows/Mac 配对。
+
+命令行与 0.3.0 v6 数据通道继续保留；正常 GUI 使用无需以下命令：
 
 ```sh
-chmod +x crossdesk "Start Mac.command" scripts/start-mac-binary.sh
-./"Start Mac.command"
+crossdesk keygen --out crossdesk.key
+crossdesk server --edge both --key-file crossdesk.key
+crossdesk client --server WINDOWS_IP:24920 --key-file crossdesk.key
 ```
-
-手动启动：
-
-```sh
-# Windows PowerShell
-.\crossdesk.exe server --edge both --key-file crossdesk.key
-# Mac：将示例 IP 替换为 Windows 当前局域网地址
-./crossdesk client --server 192.168.1.114:24920 --key-file crossdesk.key
-```
-
-连接后应显示 `protocol v6`、`image clipboard: on`、`file clipboard: on`。
 
 ## 普通文件双向互传
 
@@ -72,21 +73,28 @@ chmod +x crossdesk "Start Mac.command" scripts/start-mac-binary.sh
 | Windows 右外边界向外划 | 进入 Mac 主屏左侧 |
 | Mac 主屏左/右边界向外划 | 回到 Windows 对应另一侧 |
 | Windows Ctrl+Alt+Esc 或 Scroll Lock | 紧急返回 Windows |
-| 两端终端 Ctrl+C | 停止程序 |
+| 窗口中的“断开连接” / 关闭应用 | 停止连接 / 完全退出 |
 
 键盘跟随鼠标，Windows Ctrl 对应 Mac Command，Alt 对应 Option。支持点击、滚轮、Mac 内拖动；按住键或按钮时保留控制权，松开后再跨屏。Mac 以主显示器为控制范围，Windows 内部显示器接缝不切换。
 
-复用 Noise NNpsk0 / X25519 / ChaCha20-Poly1305 / SHA-256 加密配对连接；文件块为 16 KiB，确认后再发下一块，键鼠、心跳及控制帧优先。不增加端口。文件复制与鼠标当前在哪台电脑无关。
+复用 Noise NNpsk0 / X25519 / ChaCha20-Poly1305 / SHA-256 加密配对连接；文件块为 16 KiB，确认后再发下一块，键鼠、心跳及控制帧优先。数据传输继续使用 TCP 24920。文件复制与鼠标当前在哪台电脑无关。
 
-## 验证、构建与来源
+## 验证与构建
+
+Node.js 24、Rust stable，分别在原生 Windows / Apple Silicon Mac 上构建；Windows 需要 MSVC 构建工具，GUI 使用 WebView2。
 
 ```sh
+npm --prefix web ci
+npm --prefix web test
 cargo fmt --check
 cargo test --locked --no-default-features
-cargo test --release --locked --no-default-features large_file_stream_exceeds_image_batch_limit_without_buffering_the_file -- --ignored
-cargo build --release --locked --no-default-features
+cargo test --locked --features gui
+# Mac 应用与含源码压缩包
+bash scripts/package_macos.sh
+# Windows PowerShell 安装程序与含源码压缩包
+# powershell -File scripts/package_windows.ps1
 ```
 
-验证范围与双机验收清单见 `VALIDATION.md`。交付包提供 `source/` 对应项目源码及 `third-party-source/` 依赖源码和许可证。Mac 原生构建不要设置 `CROSSDESK_CHECK_ONLY`。
+原生 [GUI CI](https://github.com/rayem-prog/CrossDesk/actions/workflows/crossdesk-gui.yml) 同时构建 Mac `.app` 与 Windows NSIS 安装程序，并执行配对、发现策略、界面、剪贴板和 129 MiB 文件测试。自动测试的范围和待做双机验收见 [VALIDATION.md](VALIDATION.md)。交付包包含 `source/`、Rust 依赖源码、Web 依赖许可、提交编号和 SHA-256 校验文件。
 
-来源与修改说明：`LICENSE`、`THIRD_PARTY_NOTICES.md`、`UPSTREAM_README.md`。代码托管与原生 CI：[rayem-prog/CrossDesk](https://github.com/rayem-prog/CrossDesk)。
+来源与修改说明：[LICENSE](LICENSE)、[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)、[UPSTREAM_README.md](UPSTREAM_README.md)。[GitHub 项目](https://github.com/rayem-prog/CrossDesk)。

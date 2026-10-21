@@ -1,8 +1,10 @@
+use crate::service_event::{ServiceEvent, ServiceState};
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,12 +29,14 @@ pub trait ControlBackend {
     fn publish_files(&mut self, files: &[PathBuf]) -> std::io::Result<()>;
 }
 
-#[derive(Default)]
 pub struct ProcessBackend {
     child: Option<Child>,
     child_stdin: Option<ChildStdin>,
     receiver: Option<Receiver<String>>,
     logs: VecDeque<String>,
+    status: ServiceEvent,
+    latest: Arc<Mutex<Option<ServiceEvent>>>,
+    readers: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl ControlBackend for ProcessBackend {
@@ -43,6 +47,10 @@ impl ControlBackend for ProcessBackend {
                     self.push_log(format!("Service exited: {status}"));
                     self.child = None;
                     self.child_stdin = None;
+                    self.status = ServiceEvent {
+                        state: ServiceState::Error,
+                        message: Some(format!("服务已退出: {status}")),
+                    };
                     false
                 }
                 Ok(None) => true,
@@ -66,29 +74,19 @@ impl ControlBackend for ProcessBackend {
         command
             .args(&launch.args)
             .envs(launch.env.iter().map(|(key, value)| (key, value)))
-            .env("DESKBRIDGE_GUI_CHILD", "1");
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let mut child = command.spawn()?;
-        let (sender, receiver) = mpsc::channel();
-        if let Some(stdout) = child.stdout.take() {
-            spawn_log_reader(stdout, sender.clone());
-        }
-        if let Some(stderr) = child.stderr.take() {
-            spawn_log_reader(stderr, sender);
-        }
-        self.child_stdin = child.stdin.take();
-        self.receiver = Some(receiver);
-        self.child = Some(child);
-        Ok(())
+            .env("DESKBRIDGE_GUI_CHILD", "1")
+            .env_remove("CROSSDESK_ENABLE_CLIPBOARD");
+        self.spawn(command)
     }
 
     fn stop(&mut self) -> std::io::Result<()> {
         let Some(mut child) = self.child.take() else {
+            self.finish_stop();
             return Ok(());
+        };
+        self.status = ServiceEvent {
+            state: ServiceState::Stopping,
+            message: None,
         };
         if let Some(mut stdin) = self.child_stdin.take() {
             let _ = stdin.write_all(b"stop\n");
@@ -98,12 +96,15 @@ impl ControlBackend for ProcessBackend {
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
             if child.try_wait()?.is_some() {
+                self.finish_stop();
                 return Ok(());
             }
             thread::sleep(Duration::from_millis(20));
         }
         child.kill()?;
         let _ = child.wait();
+        self.push_log("服务未及时退出，已终止旧进程".into());
+        self.finish_stop();
         Ok(())
     }
 
@@ -112,6 +113,10 @@ impl ControlBackend for ProcessBackend {
     }
 
     fn collect_logs(&mut self) {
+        let event = self.latest.lock().unwrap().take();
+        if let Some(event) = event.filter(|_| self.child.is_some()) {
+            self.status = event;
+        }
         if let Some(receiver) = &self.receiver {
             for line in receiver.try_iter().collect::<Vec<_>>() {
                 self.push_log(line);
@@ -251,16 +256,138 @@ fn edge_name(edge: Edge) -> &'static str {
     }
 }
 
-fn spawn_log_reader<R>(reader: R, sender: mpsc::Sender<String>)
-where
-    R: std::io::Read + Send + 'static,
-{
+fn spawn_log_reader<R: std::io::Read + Send + 'static>(
+    reader: R,
+    sender: SyncSender<String>,
+    events: Option<Arc<Mutex<Option<ServiceEvent>>>>,
+) -> std::thread::JoinHandle<()> {
     thread::spawn(move || {
-        let reader = BufReader::new(reader);
-        for line in reader.lines().map_while(Result::ok) {
-            let _ = sender.send(line);
+        let mut reader = BufReader::new(reader);
+        loop {
+            let mut bytes = Vec::new();
+            let n = std::io::BufRead::read_until(
+                &mut std::io::Read::take(&mut reader, 16385),
+                b'\n',
+                &mut bytes,
+            );
+            match n {
+                Ok(0) | Err(_) => break,
+                _ => {}
+            }
+            let truncated = bytes.last() != Some(&b'\n');
+            if truncated {
+                loop {
+                    let mut discard = Vec::new();
+                    match std::io::BufRead::read_until(
+                        &mut std::io::Read::take(&mut reader, 16385),
+                        b'\n',
+                        &mut discard,
+                    ) {
+                        Ok(0) | Err(_) => break,
+                        _ => {
+                            if discard.last() == Some(&b'\n') {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            let line = String::from_utf8_lossy(&bytes).trim_end().to_string();
+            if !truncated {
+                if let (Some(slot), Some(event)) = (&events, crate::service_event::parse(&line)) {
+                    *slot.lock().unwrap() = Some(event);
+                    continue;
+                }
+            }
+            let _ = sender.try_send(line);
         }
-    });
+    })
+}
+impl Default for ProcessBackend {
+    fn default() -> Self {
+        Self {
+            child: None,
+            child_stdin: None,
+            receiver: None,
+            logs: VecDeque::new(),
+            status: ServiceEvent {
+                state: ServiceState::Stopped,
+                message: None,
+            },
+            latest: Arc::new(Mutex::new(None)),
+            readers: Vec::new(),
+        }
+    }
+}
+impl ProcessBackend {
+    pub fn state(&self) -> ServiceState {
+        self.status.state
+    }
+    pub fn error(&self) -> Option<String> {
+        self.status.message.clone()
+    }
+    fn finish_stop(&mut self) {
+        for t in self.readers.drain(..) {
+            let _ = t.join();
+        }
+        self.latest.lock().unwrap().take();
+        self.child_stdin = None;
+        self.receiver = None;
+        self.status = ServiceEvent {
+            state: ServiceState::Stopped,
+            message: None,
+        };
+    }
+    fn spawn(&mut self, mut command: Command) -> std::io::Result<()> {
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn()?;
+        let (tx, rx) = mpsc::sync_channel(512);
+        self.latest.lock().unwrap().take();
+        if let Some(out) = child.stdout.take() {
+            self.readers
+                .push(spawn_log_reader(out, tx.clone(), Some(self.latest.clone())));
+        }
+        if let Some(err) = child.stderr.take() {
+            self.readers.push(spawn_log_reader(err, tx, None));
+        }
+        self.child_stdin = child.stdin.take();
+        self.receiver = Some(rx);
+        self.child = Some(child);
+        self.status = ServiceEvent {
+            state: ServiceState::Starting,
+            message: None,
+        };
+        Ok(())
+    }
+    pub fn start_link(
+        &mut self,
+        config: &AppConfig,
+        key: &std::path::Path,
+        image: bool,
+        files: bool,
+    ) -> std::io::Result<()> {
+        if self.is_running() {
+            return Ok(());
+        }
+        self.finish_stop();
+        crate::secure::load_key_from(key)?;
+        let launch = ServiceLaunch::from_config(config);
+        let mut cmd = Command::new(std::env::current_exe()?);
+        cmd.args(&launch.args)
+            .envs(launch.env)
+            .env("DESKBRIDGE_GUI_CHILD", "1")
+            .env_remove("CROSSDESK_ENABLE_CLIPBOARD");
+        cmd.arg("--key-file").arg(key).args([
+            "--image-clipboard",
+            if image { "on" } else { "off" },
+            "--file-clipboard",
+            if files { "on" } else { "off" },
+        ]);
+        self.spawn(cmd)
+    }
 }
 
 #[cfg(test)]
@@ -303,3 +430,6 @@ mod tests {
         );
     }
 }
+#[cfg(all(test, feature = "gui"))]
+#[path = "control_lifecycle_tests.rs"]
+mod lifecycle_tests;

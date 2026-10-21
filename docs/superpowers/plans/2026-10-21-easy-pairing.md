@@ -199,3 +199,10 @@ fn stopping_pairing_service_closes_its_listener() {
 - [ ] **Step 2: 实现一个监听器、一个受限握手任务与退出句柄。** 非阻塞 accept 每 50 ms 检查 stop/expiry；不能为每个未认证 socket 无限开线程。停止时关闭握手 socket、join worker、清空码。默认真实配对端口 24921；测试端口由调用者指定。
 - [ ] **Step 3: 接入 CLI 入口并做回环验收。** 现有 keygen/server/client 不变，新增命令受 pairing feature 控制。任何 CLI 输出码仅用于交互模式，GUI 不读取或记录此 stdout。现有旧 .key 由 load_key_from 导入私有 host_key，源文件不删除。
 - [ ] **Step 4: 运行测试与格式检查，提交 `feat: manage short lived pairing service`。** 本子项目独立验收结束，随后实施设备发现计划。
+
+
+## Execution record — 2026-10-21
+
+Implementation is in `codex/easy-connect`. Pairing/store/discovery/policy/controller/process and UI regression tests are implemented and run locally. Production orchestration is `src/easy_connect/mod.rs` plus its actor, not the initially proposed controller.rs; test doubles replace network/OS/process boundaries only. Pairing uses real loopback transport and service tests rather than adding pair-host/pair-client CLI commands. Authenticated pending grants can recover a lost final acknowledgment through the existing v6 data channel. Manual disconnect remains authoritative.
+
+Local GUI bundle, native CI and final package verification are recorded in `VALIDATION.md`. Physical Windows/Mac discovery, OS prompts and actual Finder/Explorer paste remain acceptance work on the two computers; browser preview and loopback tests do not substitute for those checks. Checkboxes above retain the original task breakdown instead of marking unrun hardware acceptance complete.

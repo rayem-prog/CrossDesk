@@ -119,3 +119,10 @@ pub fn manual_connect(&mut self) { self.paused = false; }
 - [ ] **Step 4: 把事件接到真实认证边界。** Windows bind 后 Listening；Mac 发起前 Connecting；双方 Noise + v6 hello 和本地输入/剪贴板初始化完成后 Connected。仅网络异常走重试，配对错误走 Error。GUI 子进程 argv 自动加 --key-file、--image-clipboard on、--file-clipboard on；不在 UI 显示命令预览作为必经步骤。
 - [ ] **Step 5: 统一停止。** 一个服务进程只创建一个 stdin 控制读取器；stop/EOF 设置全局停止、关闭当前 socket、Windows 释放控制并 join workers。父进程等两秒仍未退才 kill/wait 并记录强制终止。mDNS tick、重试回调和窗口关闭均检查同一停止状态；十次假进程重启后无旧 PID/reader 残留。
 - [ ] **Step 6: 运行策略、假进程、旧 v6 与大文件回归。** `cargo test --locked --features pairing,discovery`；`cargo test --locked --no-default-features`；保留原生 Windows 剪贴板测试与 129 MiB 显式验收。提交 `feat: reconnect remembered devices and respect manual disconnect`。
+
+
+## Execution record — 2026-10-21
+
+Implementation is in `codex/easy-connect`. Pairing/store/discovery/policy/controller/process and UI regression tests are implemented and run locally. Production orchestration is `src/easy_connect/mod.rs` plus its actor, not the initially proposed controller.rs; test doubles replace network/OS/process boundaries only. Pairing uses real loopback transport and service tests rather than adding pair-host/pair-client CLI commands. Authenticated pending grants can recover a lost final acknowledgment through the existing v6 data channel. Manual disconnect remains authoritative.
+
+Local GUI bundle, native CI and final package verification are recorded in `VALIDATION.md`. Physical Windows/Mac discovery, OS prompts and actual Finder/Explorer paste remain acceptance work on the two computers; browser preview and loopback tests do not substitute for those checks. Checkboxes above retain the original task breakdown instead of marking unrun hardware acceptance complete.

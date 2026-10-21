@@ -93,7 +93,7 @@ impl PairingService {
                 s.store(true, Ordering::Release);
             })?;
         let (s, a) = (stop.clone(), active.clone());
-        let watch = thread::Builder::new()
+        let watch_result = thread::Builder::new()
             .name("pair-deadline".into())
             .spawn(move || {
                 while !s.load(Ordering::Acquire) {
@@ -108,7 +108,18 @@ impl PairingService {
                     }
                     thread::sleep(Duration::from_millis(30));
                 }
-            })?;
+            });
+        let watch = match watch_result {
+            Ok(watch) => watch,
+            Err(error) => {
+                stop.store(true, Ordering::Release);
+                if let Some(active) = active.lock().unwrap().as_ref() {
+                    let _ = active.socket.shutdown(Shutdown::Both);
+                }
+                let _ = worker.join();
+                return Err(error);
+            }
+        };
         Ok(Self {
             address,
             stop,
