@@ -21,6 +21,10 @@ Discovery advertises v7 and displays incompatible peers with an upgrade hint. Se
 
 Local verification: `cargo test --locked --features gui` **134 passing / 2 ignored**; `cargo test --locked --no-default-features` **102 passing / 1 ignored**; React **18 passing**; source-packaging regression **1 passing**; release-mode **129 MiB encrypted transfer passes**. `cargo fmt --check`, `git diff --check` and Vite production build pass. Native CI/package identifiers are recorded with the final build results. No live CrossDesk GUI or connection to the user's devices is started by validation. No test intentionally modifies this Mac's general clipboard.
 
+## Windows native source-identity regression
+
+The initial Windows native run caught same-length source replacement that preserved both timestamps during a fast rename. Metadata lengths/times alone did not distinguish the two files. Source nodes now also capture the Windows volume serial and file index from an open handle, and compare both the path's current handle and the actual sending handle during verification. Directory handles use backup semantics and source opens use OPEN_REPARSE_POINT. The original native regression remains unchanged; Windows CI reruns validate the fix. Unix continues to compare device/inode and ctime. Detection remains best-effort rather than a filesystem snapshot.
+
 ## Physical Finder / Explorer acceptance — pending
 
 1. Install both 0.5.0 test packages. Retain the existing pairing. Confirm both show connected and file/folder sync enabled.

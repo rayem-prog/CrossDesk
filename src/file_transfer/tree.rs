@@ -67,6 +67,44 @@ fn contextual(path: &Path, error: io::Error) -> io::Error {
 struct SourceNode {
     path: PathBuf,
     metadata: Metadata,
+    #[cfg(windows)]
+    identity: WindowsIdentity,
+}
+
+#[cfg(windows)]
+#[derive(PartialEq, Eq)]
+struct WindowsIdentity {
+    volume: u32,
+    index: u64,
+}
+#[cfg(windows)]
+fn windows_identity(file: &File) -> io::Result<WindowsIdentity> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if info.dwFileAttributes & (0x400 | 0x1000 | 0x40000 | 0x400000) != 0 {
+        return Err(invalid("source became a link or cloud placeholder"));
+    }
+    Ok(WindowsIdentity {
+        volume: info.dwVolumeSerialNumber,
+        index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    })
+}
+#[cfg(windows)]
+fn windows_source(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
 }
 pub struct SourceTree {
     pub entries: Vec<Entry>,
@@ -131,6 +169,14 @@ impl SourceTree {
         });
         self.nodes.push(SourceNode {
             path: path.to_owned(),
+            #[cfg(windows)]
+            identity: {
+                let file = windows_source(path)?;
+                if !unchanged(&metadata, &file.metadata()?) {
+                    return Err(invalid("source changed while scanning"));
+                }
+                windows_identity(&file)?
+            },
             metadata,
         });
         if directory {
@@ -157,6 +203,10 @@ impl SourceTree {
     }
     fn check(&self, index: usize) -> io::Result<()> {
         let n = &self.nodes[index];
+        #[cfg(windows)]
+        if windows_identity(&windows_source(&n.path)?)? != n.identity {
+            return Err(invalid("source file or directory was replaced; copy again"));
+        }
         if !unchanged(
             &n.metadata,
             &fs::symlink_metadata(&n.path).map_err(|e| contextual(&n.path, e))?,
@@ -183,6 +233,12 @@ impl SourceTree {
         }
         let mut options = OpenOptions::new();
         options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -198,10 +254,18 @@ impl SourceTree {
         if !unchanged(&node.metadata, &file.metadata()?) {
             return Err(invalid("source replaced while opening; copy again"));
         }
+        #[cfg(windows)]
+        if windows_identity(&file)? != node.identity {
+            return Err(invalid("source replaced while opening; copy again"));
+        }
         Ok(file)
     }
     pub fn verify_open(&self, index: usize, file: &File) -> io::Result<()> {
         self.check(index)?;
+        #[cfg(windows)]
+        if windows_identity(file)? != self.nodes[index].identity {
+            return Err(invalid("source replaced during transfer; copy again"));
+        }
         if !unchanged(&self.nodes[index].metadata, &file.metadata()?) {
             return Err(invalid("source file changed during transfer; copy again"));
         }
