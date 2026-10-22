@@ -39,6 +39,21 @@ fn child_fixture() {
                 );
                 std::io::stdout().flush().unwrap();
             }
+            "transfer-failed" => {
+                use crate::service_event::*;
+                for state in [TransferState::Preparing, TransferState::Failed] {
+                    println!(
+                        "{}",
+                        encode_transfer(&TransferEvent {
+                            id: "44".repeat(16),
+                            direction: TransferDirection::Send,
+                            state,
+                            message: Some("file unavailable".into())
+                        })
+                    );
+                }
+                std::io::stdout().flush().unwrap();
+            }
             "stop" => return,
             _ => {}
         }
@@ -108,9 +123,27 @@ fn a_live_process_is_not_connected_and_repeated_stops_reap_it() {
             .write_all(b"connect\n")
             .unwrap();
         wait_state(&mut b, ServiceState::Connected);
+        b.child_stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"transfer-failed\n")
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            b.collect_logs();
+            if b.transfer_status()
+                .is_some_and(|e| e.state == crate::service_event::TransferState::Failed)
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(b.state(), ServiceState::Connected);
         b.stop().unwrap();
         assert!(!b.is_running());
         assert!(b.child.is_none());
         assert_eq!(b.state(), ServiceState::Stopped);
+        assert!(b.transfer_status().is_none());
     }
 }

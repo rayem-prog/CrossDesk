@@ -37,6 +37,7 @@ pub struct ProcessBackend {
     status: ServiceEvent,
     latest: Arc<Mutex<Option<ServiceEvent>>>,
     readers: Vec<std::thread::JoinHandle<()>>,
+    transfers: Arc<Mutex<crate::service_event::TransferTracker>>,
 }
 
 impl ControlBackend for ProcessBackend {
@@ -47,6 +48,7 @@ impl ControlBackend for ProcessBackend {
                     self.push_log(format!("Service exited: {status}"));
                     self.child = None;
                     self.child_stdin = None;
+                    *self.transfers.lock().unwrap() = Default::default();
                     self.status = ServiceEvent {
                         state: ServiceState::Error,
                         message: Some(format!("服务已退出: {status}")),
@@ -260,6 +262,7 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
     reader: R,
     sender: SyncSender<String>,
     events: Option<Arc<Mutex<Option<ServiceEvent>>>>,
+    transfers: Option<Arc<Mutex<crate::service_event::TransferTracker>>>,
 ) -> std::thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut reader = BufReader::new(reader);
@@ -294,6 +297,12 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
             }
             let line = String::from_utf8_lossy(&bytes).trim_end().to_string();
             if !truncated {
+                if let (Some(slot), Some(event)) =
+                    (&transfers, crate::service_event::parse_transfer(&line))
+                {
+                    slot.lock().unwrap().apply(event);
+                    continue;
+                }
                 if let (Some(slot), Some(event)) = (&events, crate::service_event::parse(&line)) {
                     *slot.lock().unwrap() = Some(event);
                     continue;
@@ -316,10 +325,18 @@ impl Default for ProcessBackend {
             },
             latest: Arc::new(Mutex::new(None)),
             readers: Vec::new(),
+            transfers: Arc::new(Mutex::new(Default::default())),
         }
     }
 }
 impl ProcessBackend {
+    pub fn transfer_status(&self) -> Option<crate::service_event::TransferEvent> {
+        if self.child.is_some() {
+            self.transfers.lock().unwrap().latest.clone()
+        } else {
+            None
+        }
+    }
     pub fn state(&self) -> ServiceState {
         self.status.state
     }
@@ -331,6 +348,7 @@ impl ProcessBackend {
             let _ = t.join();
         }
         self.latest.lock().unwrap().take();
+        *self.transfers.lock().unwrap() = Default::default();
         self.child_stdin = None;
         self.receiver = None;
         self.status = ServiceEvent {
@@ -346,12 +364,17 @@ impl ProcessBackend {
         let mut child = command.spawn()?;
         let (tx, rx) = mpsc::sync_channel(512);
         self.latest.lock().unwrap().take();
+        *self.transfers.lock().unwrap() = Default::default();
         if let Some(out) = child.stdout.take() {
-            self.readers
-                .push(spawn_log_reader(out, tx.clone(), Some(self.latest.clone())));
+            self.readers.push(spawn_log_reader(
+                out,
+                tx.clone(),
+                Some(self.latest.clone()),
+                Some(self.transfers.clone()),
+            ));
         }
         if let Some(err) = child.stderr.take() {
-            self.readers.push(spawn_log_reader(err, tx, None));
+            self.readers.push(spawn_log_reader(err, tx, None, None));
         }
         self.child_stdin = child.stdin.take();
         self.receiver = Some(rx);

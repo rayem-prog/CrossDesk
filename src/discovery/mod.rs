@@ -19,6 +19,7 @@ pub struct Candidate {
     pub name: String,
     pub endpoints: Vec<SocketAddr>,
     pub pairing_port: Option<u16>,
+    pub protocol: u16,
 }
 #[derive(Default)]
 pub struct Catalog {
@@ -62,6 +63,9 @@ impl Catalog {
         let mut out: Vec<Candidate> = Vec::new();
         for (peer, _) in self.entries.values() {
             if let Some(old) = out.iter_mut().find(|p| p.id == peer.id) {
+                if peer.protocol != crate::protocol::VERSION {
+                    old.protocol = peer.protocol;
+                }
                 for addr in &peer.endpoints {
                     if old.endpoints.len() < 8 && !old.endpoints.contains(addr) {
                         old.endpoints.push(*addr);
@@ -149,9 +153,7 @@ impl Discovery {
                 while !s.load(Ordering::Acquire) {
                     match receiver.recv_timeout(Duration::from_millis(100)) {
                         Ok(ServiceEvent::ServiceResolved(info)) => {
-                            if info.get_property_val_str("role") != Some("windows")
-                                || info.get_property_val_str("protocol") != Some("6")
-                            {
+                            if info.get_property_val_str("role") != Some("windows") {
                                 continue;
                             }
                             let Some(id) = info
@@ -182,6 +184,10 @@ impl Discovery {
                                 }
                             }
                             let peer = Candidate {
+                                protocol: info
+                                    .get_property_val_str("protocol")
+                                    .and_then(|s| s.parse().ok())
+                                    .unwrap_or(0),
                                 id,
                                 name: info
                                     .get_property_val_str("name")
@@ -222,7 +228,7 @@ impl Discovery {
         let mut properties = HashMap::<String, String>::from([
             ("id".into(), id.clone()),
             ("role".into(), "windows".into()),
-            ("protocol".into(), "6".into()),
+            ("protocol".into(), crate::protocol::VERSION.to_string()),
             (
                 "name".into(),
                 name.chars().filter(|c| !c.is_control()).take(32).collect(),

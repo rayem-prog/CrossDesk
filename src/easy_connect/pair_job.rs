@@ -12,6 +12,9 @@ impl PairJob {
         code: [u8; 6],
         store: Arc<TrustedStore>,
     ) -> io::Result<Self> {
+        if candidate.protocol != crate::protocol::VERSION {
+            return Err(io::Error::other(VERSION_MISMATCH));
+        }
         let port = candidate
             .pairing_port
             .ok_or_else(|| io::Error::other("请在 Windows 上重新生成配对码"))?;

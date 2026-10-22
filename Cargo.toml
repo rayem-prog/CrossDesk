@@ -1,6 +1,6 @@
 [package]
 name = "crossdesk"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 license = "GPL-3.0-only"
 
@@ -11,6 +11,7 @@ discovery = ["dep:mdns-sd"]
 gui = ["pairing", "discovery", "dep:tauri", "dep:tauri-build", "dep:tauri-plugin-single-instance", "dep:tauri-plugin-dialog", "dep:reqwest", "dep:serde", "dep:serde_json"]
 
 [dependencies]
+unicode-normalization = "0.1"
 spake2 = { version = "=0.4.0", optional = true }
 hkdf = { version = "0.12", optional = true }
 mdns-sd = { version = "0.21", optional = true }

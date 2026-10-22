@@ -189,7 +189,7 @@ fn print_usage() {
 Use the same crossdesk.key on both machines. Both horizontal edges are enabled by default.
 Emergency release on Windows: Ctrl+Alt+Esc or Scroll Lock.
 Image and ordinary file clipboard sync are on by default. Copy screenshots, PDFs, documents or ZIP files after connecting.
-Both computers must run protocol v6. Files: 512 MiB each, 2 GiB/batch, 64 files. Text, directories and resume are outside this mode.",
+Both computers must run CrossDesk 0.5.0 / protocol v7. Files/folders: 512 MiB per file, 2 GiB/batch, 64 roots, 10,000 entries, 32 levels. Text and resume are outside this mode.",
         env!("CARGO_PKG_VERSION")
     );
 }

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::platform::Platform;
 
-pub const VERSION: u16 = 6;
+pub const VERSION: u16 = 7;
 pub const CHUNK_SIZE: usize = 16 * 1024;
 pub const MAX_FRAME_PAYLOAD_SIZE: usize = 64 * 1024;
 
@@ -33,6 +33,7 @@ pub enum FrameKind {
     FileAck = 20,
     FileCancel = 21,
     TransferResult = 22,
+    FileManifest = 23,
 }
 
 impl FrameKind {
@@ -60,6 +61,7 @@ impl FrameKind {
             20 => Ok(Self::FileAck),
             21 => Ok(Self::FileCancel),
             22 => Ok(Self::TransferResult),
+            23 => Ok(Self::FileManifest),
             _ => Err(invalid("unknown frame kind")),
         }
     }
@@ -183,7 +185,7 @@ pub fn decode_hello(payload: &[u8]) -> std::io::Result<Hello> {
         .unwrap_or(Platform::Unknown);
     let dimensions_offset = if version >= 5 { 4 } else { 3 };
     if version == VERSION && !matches!(payload.len(), 4 | 12) {
-        return Err(invalid("invalid v6 hello length"));
+        return Err(invalid("invalid v7 hello length"));
     }
     let (screen_width, screen_height) = if payload.len() >= dimensions_offset + 8 {
         (
@@ -440,8 +442,8 @@ fn invalid_owned(message: String) -> std::io::Error {
 mod tests {
     use super::*;
     #[test]
-    fn v6_hello_decodes_capabilities_without_shifting_screen_dimensions() {
-        let hello = decode_hello(&[0, 6, 2, 3, 0, 0, 5, 232, 0, 0, 3, 214]).unwrap();
+    fn v7_hello_decodes_capabilities_without_shifting_screen_dimensions() {
+        let hello = decode_hello(&[0, 7, 2, 3, 0, 0, 5, 232, 0, 0, 3, 214]).unwrap();
         assert!(hello.image_clipboard && hello.file_clipboard);
         assert_eq!(hello.screen_width, Some(1512));
         assert_eq!(hello.screen_height, Some(982));

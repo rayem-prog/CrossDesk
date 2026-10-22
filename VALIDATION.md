@@ -1,3 +1,44 @@
+# CrossDesk 0.5.0 validation — 2026-10-22
+
+## Current implementation
+
+Protocol v7 carries a parent-first tree (type, parent index, portable basename, length), in ordered bounded manifest pages. Both peers independently enforce 64 roots, 10,000 entries, 32 levels, 512 MiB/file, 2 GiB/batch, 4 MiB/manifest, 64 KiB/frame and 4 GiB recursive file-cache budget. Files are streamed and SHA-256 checked; empty directories survive without synthetic file data. All content is staged before publishing top-level native clipboard paths. Unpublished batches own and remove the entire staging root; published earlier batches survive subsequent failures.
+
+Source scanning opens/checks/closes files individually; sending holds one source handle. Directory/file metadata and identities are rechecked before/after transfer. Links, reparse points, unmaterialized cloud placeholders, inaccessible entries and unsafe names reject the batch. This is best-effort change detection, not a filesystem snapshot; no permissions, xattrs or link relations are migrated.
+
+Separate bounded transfer IPC supplies preparing, transferring, waiting, ready, skipped and failed notices; these cannot establish or end a connection. Terminal publication notices cannot regress to waiting if a fast peer publishes before the sender finishes handling its commit ACK. Commit credit is granted only after the completed batch is queued for publication. A bounded native-revision lineage guard additionally prevents a late older batch crossing an intervening local-copy boundary after a newer remote image has published.
+
+Discovery advertises v7 and displays incompatible peers with an upgrade hint. Selection, pairing and reconnect reject them, including a saved-address fallback after a known incompatible peer disappears. Existing trust store, keys, identities and preferences are unchanged.
+
+## Automated verification
+
+- Real encrypted bidirectional folder + mixed file transfer checks nested/empty directories, hidden files, Chinese names, zero-byte files and exact contents. A separate encrypted multi-page manifest transfers a file after hundreds of directories.
+- Adversarial manifests exercise bad parents, cycles/forward references, files used as parents, traversal, invalid lengths, count/depth/size limits, partial metadata cancellation and a declared manifest above 4 MiB.
+- Native scanning covers exact limits and one-over-limit, source additions/deletions/replacement, cancellation and Unix links. Windows-only tests use a real offline attribute and directory junction.
+- Cache/receiver tests cover recursive quota, canonical-equivalent names and renamed subtrees, retained older batches, corruption, serial/offset errors, cancellation, timeouts and cleanup on drop.
+- Clipboard observer tests cover folders, no echo, identical recopy, newer local content and the cross-content late-completion regression. macOS native tests use named NSPasteboards. Native file paths use NUL delimiters so a control-character filename is preserved as one invalid item for whole-batch rejection, rather than being split into different source paths. Windows system-clipboard tests are ignored except on disposable GitHub CI runners.
+- UI tests cover each transfer state, direction-specific waiting, failure while connected, disconnect without a paired fixture, incompatible devices and unchanged options flow. Controller tests cover actual mDNS discovery plus incompatible-peer recovery and bounded remembered versions.
+
+Local verification: `cargo test --locked --features gui` **135 passing / 2 ignored**; `cargo test --locked --no-default-features` **103 passing / 1 ignored**; React **18 passing**; source-packaging regression **1 passing**; release-mode **129 MiB encrypted transfer passes**. `cargo fmt --check`, `git diff --check` and Vite production build pass. Native CI/package identifiers are recorded with the final build results. No live CrossDesk GUI or connection to the user's devices is started by validation. No test intentionally modifies this Mac's general clipboard.
+
+## Windows native source-identity regression
+
+The initial Windows native run caught same-length source replacement that preserved both timestamps during a fast rename. Metadata lengths/times alone did not distinguish the two files. Source nodes now also capture the Windows volume serial and file index from an open handle, and compare both the path's current handle and the actual sending handle during verification. Directory handles use backup semantics and source opens use OPEN_REPARSE_POINT. The original native regression remains unchanged; Windows CI reruns validate the fix. The Windows GUI run also exposed cached directory write times after a child was added. Directory verification now re-enumerates and compares exact bounded child-name lists, in addition to metadata and identity checks, so added/removed entries cannot rely on delayed directory timestamps. Unix continues to compare device/inode and ctime. Detection remains best-effort rather than a filesystem snapshot.
+
+## Physical Finder / Explorer acceptance — pending
+
+1. Install both 0.5.0 test packages. Retain the existing pairing. Confirm both show connected and file/folder sync enabled.
+2. Copy a folder containing nested and empty directories, hidden files, zero-byte files and Chinese/accented names. Paste in the other file manager. Repeat both ways and compare each file's length and SHA-256.
+3. Copy several folders mixed with PDFs/images. Try same-basename roots and Unicode-equivalent names; verify each subtree remains associated with its allocated name. Confirm the destination file manager handles final paste-name conflicts.
+4. During a large transfer, add/remove/change a source file, make a new local copy at either end, cancel or interrupt Wi-Fi. Confirm no half batch is published, newer clipboard content survives, an explicit identical recopy retries, and an earlier completed copy remains pasteable.
+5. Repeat screenshots, single-image paste in intended applications, keyboard/mouse, emergency release, pairing, reconnect and closing both windows. Check actual OS permission/firewall and unsigned installer prompts.
+
+These hardware/file-manager checks have not been performed. Test packages are not a formal GitHub Release; physical acceptance is required before release. Mac builds use ad-hoc signatures and are not notarized.
+
+---
+
+## Previous 0.4.0 validation record (historical)
+
 # CrossDesk 0.4.0 validation — 2026-10-21
 
 ## New easy-start evidence

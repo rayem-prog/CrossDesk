@@ -8,6 +8,7 @@ use crate::{
     trust_store::{DeviceId, TrustedStore, hex},
 };
 use std::{
+    collections::HashSet,
     io,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -19,6 +20,7 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+const VERSION_MISMATCH: &str = "设备版本不兼容，请将两端 CrossDesk 都升级到 0.5.0 后重试";
 mod preferences;
 pub use preferences::Preferences;
 mod pair_job;
@@ -31,6 +33,7 @@ pub struct DeviceView {
     pub id: String,
     pub name: String,
     pub paired: bool,
+    pub compatible: bool,
 }
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,6 +51,7 @@ pub struct ConnectView {
     pub busy: bool,
     pub logs: Vec<String>,
     pub app_version: String,
+    pub transfer: Option<crate::service_event::TransferEvent>,
 }
 impl ConnectView {
     pub fn loading() -> Self {
@@ -64,6 +68,7 @@ impl ConnectView {
             error: None,
             busy: false,
             logs: Vec::new(),
+            transfer: None,
             app_version: env!("CARGO_PKG_VERSION").into(),
         }
     }
@@ -74,8 +79,14 @@ pub trait ServiceControl: Send {
     fn stop(&mut self) -> io::Result<()>;
     fn poll(&mut self) -> (ServiceState, Option<String>);
     fn logs(&self) -> Vec<String>;
+    fn transfer(&self) -> Option<crate::service_event::TransferEvent> {
+        None
+    }
 }
 impl ServiceControl for ProcessBackend {
+    fn transfer(&self) -> Option<crate::service_event::TransferEvent> {
+        self.transfer_status()
+    }
     fn start(&mut self, c: &AppConfig, k: &Path, i: bool, f: bool) -> io::Result<()> {
         self.start_link(c, k, i, f)
     }
@@ -127,6 +138,7 @@ pub struct Core {
     backend: Box<dyn ServiceControl>,
     pub candidates: Vec<Candidate>,
     discovery: Option<Box<dyn DiscoverySource>>,
+    incompatible: HashSet<DeviceId>,
     pairing: Option<PairingService>,
     job: Option<PairJob>,
     selected: Option<DeviceId>,
@@ -162,6 +174,7 @@ impl Core {
             backend,
             candidates: Vec::new(),
             discovery: None,
+            incompatible: HashSet::new(),
             pairing: None,
             job: None,
             selected: None,
@@ -232,6 +245,22 @@ impl Core {
     pub fn tick_at(&mut self, now: Instant) -> io::Result<()> {
         if let Some(d) = &self.discovery {
             self.candidates = d.snapshot();
+        }
+        self.incompatible.retain(|id| {
+            self.trusted == Some(*id)
+                || self.selected == Some(*id)
+                || self.candidates.iter().any(|p| p.id == *id)
+        });
+        for candidate in &self.candidates {
+            if candidate.protocol != crate::protocol::VERSION {
+                self.incompatible.insert(candidate.id);
+            } else if !self
+                .candidates
+                .iter()
+                .any(|p| p.id == candidate.id && p.protocol != crate::protocol::VERSION)
+            {
+                self.incompatible.remove(&candidate.id);
+            }
         }
         if let Some(job) = &self.job {
             if let Some(result) = job.result() {
@@ -312,6 +341,13 @@ impl Core {
             self.policy.retry(now);
         }
         if let Some(peer) = paired {
+            if self.incompatible.contains(&peer.id) {
+                self.error = Some(VERSION_MISMATCH.into());
+                return Ok(());
+            }
+            if self.error.as_deref() == Some(VERSION_MISMATCH) {
+                self.error = None;
+            }
             if self.policy.should_connect(peer.id, now) {
                 let address = if self.platform == "windows" {
                     Some("0.0.0.0:24920".parse().unwrap())
@@ -375,6 +411,7 @@ impl Core {
                     p.name.clone()
                 },
                 paired: Some(p.id) == paired,
+                compatible: p.protocol == crate::protocol::VERSION,
             })
             .collect();
         if let Some(id) = paired {
@@ -391,6 +428,7 @@ impl Core {
                         self.prefs.peer_name.clone()
                     },
                     paired: true,
+                    compatible: !self.incompatible.contains(&id),
                 });
             }
         }
@@ -404,6 +442,7 @@ impl Core {
         view.error = self.error.clone().or_else(|| self.discovery_error.clone());
         view.busy = self.job.is_some();
         view.logs = self.backend.logs();
+        view.transfer = self.backend.transfer();
         let pair_view = self.pairing.as_ref().map(PairingService::view);
         if let Some(p) = pair_view {
             view.pairing_code = p.code;
@@ -457,6 +496,15 @@ impl Core {
         Ok(())
     }
     pub fn connect(&mut self) -> io::Result<()> {
+        if self.trusted.is_some_and(|id| {
+            self.incompatible.contains(&id)
+                || self
+                    .candidates
+                    .iter()
+                    .any(|p| p.id == id && p.protocol != crate::protocol::VERSION)
+        }) {
+            return Err(io::Error::other(VERSION_MISMATCH));
+        }
         self.paused_by_user = false;
         self.policy.manual_connect();
         self.error = None;
@@ -472,6 +520,13 @@ impl Core {
     pub fn command(&mut self, command: Command) -> io::Result<bool> {
         match command {
             Command::Select(id) => {
+                if self
+                    .candidates
+                    .iter()
+                    .any(|p| p.id == id && p.protocol != crate::protocol::VERSION)
+                {
+                    return Err(io::Error::other(VERSION_MISMATCH));
+                }
                 self.paused_by_user = false;
                 self.policy.manual_connect();
                 if self.store.paired()?.is_some() {

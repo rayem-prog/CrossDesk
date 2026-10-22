@@ -1,12 +1,22 @@
 // CrossDesk file clipboard sessions: 2026-10-20 (GPL-3.0-only).
-use super::wire::{self, Ack, Entry, Id, Offer, Reader};
-use super::{IncomingBundle, MAX_CACHE_BYTES, invalid, sources};
+#[cfg(test)]
+use super::wire::Entry;
+use super::wire::{self, Ack, Id, MAX_MANIFEST, Offer, Reader};
+use super::{
+    MAX_CACHE_BYTES, invalid,
+    tree::SourceTree,
+    tree_cache::{TreeCache, cache_size},
+};
 use crate::protocol::{CHUNK_SIZE, Frame, FrameKind};
+use crate::service_event::{
+    TransferDirection::{Receive, Send},
+    TransferState as TS, transfer,
+};
 use crate::transport::SharedWriter;
 use sha2::{Digest, Sha256};
 use std::{
     io::{self, Read},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -21,6 +31,7 @@ pub struct CompletedBatch {
     pub id: Id,
     pub revision: u64,
     pub files: Vec<PathBuf>,
+    root: PathBuf,
     retained: bool,
 }
 impl CompletedBatch {
@@ -31,9 +42,7 @@ impl CompletedBatch {
 impl Drop for CompletedBatch {
     fn drop(&mut self) {
         if !self.retained {
-            if let Some(parent) = self.files.first().and_then(|p| p.parent()) {
-                let _ = std::fs::remove_dir_all(parent);
-            }
+            let _ = std::fs::remove_dir_all(&self.root);
         }
     }
 }
@@ -43,7 +52,15 @@ struct Active {
     index: usize,
     offset: u64,
     hash: Sha256,
-    bundle: IncomingBundle,
+    bundle: TreeCache,
+    revision: u64,
+    progress: Instant,
+}
+struct Pending {
+    id: Id,
+    len: usize,
+    data: Vec<u8>,
+    serial: u64,
     revision: u64,
     progress: Instant,
 }
@@ -51,12 +68,14 @@ pub struct Receiver {
     root: PathBuf,
     cache_budget: u64,
     active: Option<Active>,
+    pending: Option<Pending>,
 }
 impl Receiver {
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
             active: None,
+            pending: None,
             cache_budget: MAX_CACHE_BYTES,
         }
     }
@@ -66,69 +85,132 @@ impl Receiver {
             .as_ref()
             .is_some_and(|a| a.progress.elapsed() > TIMEOUT)
         {
+            transfer(
+                self.active.as_ref().unwrap().offer.id,
+                Receive,
+                TS::Failed,
+                Some("接收超时，请重新复制".into()),
+            );
             self.active = None;
             eprintln!("file clipboard receive timed out; partial files removed");
         }
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|a| a.progress.elapsed() > TIMEOUT)
+        {
+            transfer(
+                self.pending.as_ref().unwrap().id,
+                Receive,
+                TS::Failed,
+                Some("目录清单接收超时，请重新复制".into()),
+            );
+            self.pending = None;
+        }
     }
     pub fn handle(&mut self, frame: Frame, revision: u64) -> io::Result<Option<CompletedBatch>> {
-        let identity = wire::identity(&frame)?;
-        if frame.kind == FrameKind::FileCancel {
-            if frame.payload.len() != 16 {
-                return Err(invalid("invalid file cancellation"));
-            }
-            if self
-                .active
-                .as_ref()
-                .is_some_and(|a| a.offer.id == identity.0)
-            {
+        let (id, _) = wire::identity(&frame)?;
+        let cancelled = frame.kind == FrameKind::FileCancel;
+        if cancelled && frame.payload.len() != 16 {
+            return Err(invalid("invalid file cancellation"));
+        }
+        let result = if cancelled {
+            Ok(None)
+        } else {
+            self.handle_inner(frame, revision)
+        };
+        if cancelled || result.is_err() {
+            if self.active.as_ref().is_some_and(|a| a.offer.id == id) {
                 self.active = None;
             }
-            return Ok(None);
-        }
-        let result = self.handle_inner(frame, revision);
-        if result.is_err()
-            && self
-                .active
-                .as_ref()
-                .is_some_and(|a| a.offer.id == identity.0)
-        {
-            self.active = None;
+            if self.pending.as_ref().is_some_and(|a| a.id == id) {
+                self.pending = None;
+            }
         }
         result
     }
+    fn finish_metadata(&mut self) -> io::Result<()> {
+        if !self.pending.as_ref().is_some_and(|p| p.data.len() == p.len) {
+            return Ok(());
+        }
+        let p = self.pending.take().unwrap();
+        let offer = Offer::parse_metadata(p.id, &p.data)?;
+        if cache_size(&self.root)?
+            .checked_add(offer.total())
+            .is_none_or(|n| n > self.cache_budget)
+        {
+            return Err(invalid(
+                "file cache budget reached; clear unreferenced caches before retrying",
+            ));
+        }
+        let mut bundle = TreeCache::new(&self.root, &offer)?;
+        let index = offer
+            .entries
+            .iter()
+            .position(|e| !e.directory)
+            .unwrap_or(offer.entries.len());
+        if let Some(e) = offer.entries.get(index) {
+            bundle.start(index, e.len)?;
+        }
+        self.active = Some(Active {
+            offer,
+            serial: p.serial,
+            index,
+            offset: 0,
+            hash: Sha256::new(),
+            bundle,
+            revision: p.revision,
+            progress: Instant::now(),
+        });
+        Ok(())
+    }
     fn handle_inner(&mut self, frame: Frame, revision: u64) -> io::Result<Option<CompletedBatch>> {
         if frame.kind == FrameKind::FileOffer {
-            if self.active.is_some() {
+            if self.active.is_some() || self.pending.is_some() {
                 return Err(invalid("file batch already in progress"));
             }
-            let offer = Offer::parse(&frame.payload)?;
-            if cache_size(&self.root)?.saturating_add(offer.total()) > self.cache_budget {
-                return Err(invalid(
-                    "file cache budget reached; clear unreferenced caches before retrying",
-                ));
+            let mut r = Reader::new(&frame.payload);
+            let id = r.id()?;
+            let len = r.u32()? as usize;
+            if len < 2 || len > MAX_MANIFEST || r.rest().is_empty() || r.rest().len() > len {
+                return Err(invalid("invalid manifest size; maximum is 4 MiB"));
             }
-            let mut bundle = IncomingBundle::new(self.root.clone());
-            bundle.start_file(&offer.entries[0].name, offer.entries[0].len)?;
-            self.active = Some(Active {
-                offer,
+            self.pending = Some(Pending {
+                id,
+                len,
+                data: r.rest().to_vec(),
                 serial: 1,
-                index: 0,
-                offset: 0,
-                hash: Sha256::new(),
-                bundle,
                 revision,
                 progress: Instant::now(),
             });
+            self.finish_metadata()?;
+            return Ok(None);
+        }
+        if frame.kind == FrameKind::FileManifest {
+            let p = self
+                .pending
+                .as_mut()
+                .ok_or_else(|| invalid("manifest continuation without offer"))?;
+            let mut r = Reader::new(&frame.payload);
+            if r.id()? != p.id
+                || r.u64()? != p.serial
+                || r.rest().is_empty()
+                || p.data.len() + r.rest().len() > p.len
+            {
+                return Err(invalid("invalid manifest page ID, serial or length"));
+            }
+            p.data.extend_from_slice(r.rest());
+            p.serial += 1;
+            p.progress = Instant::now();
+            self.finish_metadata()?;
             return Ok(None);
         }
         let active = self
             .active
             .as_mut()
-            .ok_or_else(|| invalid("file data without offer"))?;
+            .ok_or_else(|| invalid("file data without complete manifest"))?;
         let mut r = Reader::new(&frame.payload);
-        let id = r.id()?;
-        let serial = r.u64()?;
-        if id != active.offer.id || serial != active.serial {
+        if r.id()? != active.offer.id || r.u64()? != active.serial {
             return Err(invalid("file batch ID or serial mismatch"));
         }
         match frame.kind {
@@ -140,11 +222,11 @@ impl Receiver {
                     || offset != active.offset
                     || data.is_empty()
                     || data.len() > CHUNK_SIZE
-                    || active.index >= active.offer.entries.len()
+                    || index >= active.offer.entries.len()
                 {
                     return Err(invalid("file index, offset or chunk size mismatch"));
                 }
-                active.bundle.write_chunk(data)?;
+                active.bundle.write(data)?;
                 active.hash.update(data);
                 active.offset += data.len() as u64;
             }
@@ -159,11 +241,20 @@ impl Receiver {
                 {
                     return Err(invalid("file length or SHA-256 mismatch"));
                 }
+                active.bundle.seal()?;
                 active.index += 1;
+                while active
+                    .offer
+                    .entries
+                    .get(active.index)
+                    .is_some_and(|e| e.directory)
+                {
+                    active.index += 1;
+                }
                 active.offset = 0;
                 active.hash = Sha256::new();
                 if let Some(next) = active.offer.entries.get(active.index) {
-                    active.bundle.start_file(&next.name, next.len)?;
+                    active.bundle.start(active.index, next.len)?;
                 }
             }
             FrameKind::FileCommit => {
@@ -171,12 +262,13 @@ impl Receiver {
                 if active.index != active.offer.entries.len() {
                     return Err(invalid("file batch is incomplete"));
                 }
-                let mut completed = self.active.take().unwrap();
-                let files = completed.bundle.finish()?;
+                let completed = self.active.take().unwrap();
+                let (root, files) = completed.bundle.finish()?;
                 return Ok(Some(CompletedBatch {
                     id: completed.offer.id,
                     revision: completed.revision,
                     files,
+                    root,
                     retained: false,
                 }));
             }
@@ -186,31 +278,6 @@ impl Receiver {
         active.progress = Instant::now();
         Ok(None)
     }
-}
-fn cache_size(root: &Path) -> io::Result<u64> {
-    let dirs = match std::fs::read_dir(root) {
-        Ok(v) => v,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
-        Err(e) => return Err(e),
-    };
-    let mut total = 0u64;
-    for entry in dirs {
-        let entry = entry?;
-        let m = entry.file_type()?;
-        if m.is_symlink() {
-            return Err(invalid("unexpected link in private file cache"));
-        }
-        if m.is_dir() {
-            for f in std::fs::read_dir(entry.path())? {
-                let f = f?;
-                let m = f.metadata()?;
-                total = total.saturating_add(m.len());
-            }
-        } else {
-            total = total.saturating_add(entry.metadata()?.len());
-        }
-    }
-    Ok(total)
 }
 #[derive(Default)]
 struct ReplyState {
@@ -291,29 +358,44 @@ impl FileSender {
                 "file session stopped or copy superseded",
             ));
         }
-        let mut sources = sources(files)?;
         let mut id = [0; 16];
         getrandom::getrandom(&mut id).map_err(|e| io::Error::other(e.to_string()))?;
-        let offer = Offer {
-            id,
-            entries: sources
-                .iter()
-                .map(|s| Entry {
-                    name: s.name.clone(),
-                    len: s.len,
-                })
-                .collect(),
-        };
+        transfer(id, Send, TS::Preparing, None);
         let result = (|| {
-            self.exchange(offer.frame(), &mut cancel)?;
-            let mut serial = 1;
+            let mut cancelled = || {
+                self.shared.stop.load(Ordering::Acquire) || crate::shutdown::requested() || cancel()
+            };
+            let sources = SourceTree::scan(files, &mut cancelled)?;
+            let offer = sources.offer(id);
+            offer.validate()?;
+            transfer(
+                id,
+                Send,
+                TS::Transferring,
+                Some(format!(
+                    "{} 项 · {} 字节",
+                    offer.entries.len(),
+                    offer.total()
+                )),
+            );
+            let frames = offer.frames();
+            let mut serial = frames.len() as u64;
+            for frame in frames {
+                self.exchange(frame, &mut cancelled)?;
+            }
+            sources.verify(&mut cancelled)?;
             let mut buffer = vec![0; CHUNK_SIZE];
-            for (index, source) in sources.iter_mut().enumerate() {
+            for (index, entry) in sources.entries.iter().enumerate() {
+                if entry.directory {
+                    continue;
+                }
+                let mut file = sources.open(index)?;
                 let mut offset = 0;
                 let mut hash = Sha256::new();
-                while offset < source.len {
-                    let length = (source.len - offset).min(CHUNK_SIZE as u64) as usize;
-                    let n = source.file.read(&mut buffer[..length])?;
+                while offset < entry.len {
+                    super::tree::cancelled(&mut cancelled)?;
+                    let length = (entry.len - offset).min(CHUNK_SIZE as u64) as usize;
+                    let n = file.read(&mut buffer[..length])?;
                     if n == 0 {
                         return Err(invalid("source file truncated; copy again"));
                     }
@@ -327,12 +409,13 @@ impl FileSender {
                             offset,
                             &buffer[..n],
                         ),
-                        &mut cancel,
+                        &mut cancelled,
                     )?;
                     serial += 1;
                     offset += n as u64;
                 }
-                source.unchanged()?;
+                sources.verify_open(index, &file)?;
+                drop(file);
                 self.exchange(
                     wire::request(
                         FrameKind::FileSeal,
@@ -342,24 +425,35 @@ impl FileSender {
                         0,
                         &hash.finalize(),
                     ),
-                    &mut cancel,
+                    &mut cancelled,
                 )?;
                 serial += 1;
             }
-            for source in &sources {
-                source.unchanged()?;
-            }
+            sources.verify(&mut cancelled)?;
             self.exchange(
                 wire::request(FrameKind::FileCommit, id, serial, 0, 0, &[]),
-                &mut cancel,
+                &mut cancelled,
             )?;
             eprintln!(
-                "file clipboard transmitted: {} file(s), {} bytes; waiting for destination publication",
+                "file clipboard transmitted: {} items, {} bytes; waiting for destination publication",
                 offer.entries.len(),
                 offer.total()
             );
+            transfer(id, Send, TS::Waiting, Some("等待对方发布到剪贴板".into()));
             Ok(id)
         })();
+        if let Err(e) = &result {
+            transfer(
+                id,
+                Send,
+                if e.kind() == io::ErrorKind::Interrupted {
+                    TS::Skipped
+                } else {
+                    TS::Failed
+                },
+                Some(e.to_string()),
+            );
+        }
         if result.is_err()
             && !self.shared.stop.load(Ordering::Acquire)
             && !crate::shutdown::requested()
@@ -389,7 +483,7 @@ impl FileSession {
     pub fn start(
         writer: SharedWriter,
         root: PathBuf,
-        mut completed: impl FnMut(CompletedBatch) + Send + 'static,
+        mut completed: impl FnMut(CompletedBatch) + std::marker::Send + 'static,
     ) -> io::Result<Self> {
         let shared = Arc::new(Shared {
             replies: Mutex::new(ReplyState::default()),
@@ -421,8 +515,22 @@ impl FileSession {
                         }
                     };
                     let cancelled = command.frame.kind == FrameKind::FileCancel;
+                    if command.frame.kind == FrameKind::FileOffer {
+                        transfer(
+                            identity.0,
+                            Receive,
+                            TS::Transferring,
+                            Some("正在接收文件和文件夹".into()),
+                        );
+                    }
                     let result = receiver.handle(command.frame, command.revision);
                     if cancelled {
+                        transfer(
+                            identity.0,
+                            Receive,
+                            TS::Skipped,
+                            Some("发送端取消了本次复制".into()),
+                        );
                         continue;
                     }
                     let status = match &result {
@@ -430,16 +538,29 @@ impl FileSession {
                         Ok(None) => 0,
                         Err(_) => 2,
                     };
+                    match result {
+                        Ok(Some(batch)) => {
+                            transfer(
+                                identity.0,
+                                Receive,
+                                TS::Waiting,
+                                Some("校验完成，等待写入剪贴板".into()),
+                            );
+                            completed(batch)
+                        }
+                        Err(e) => {
+                            transfer(identity.0, Receive, TS::Failed, Some(e.to_string()));
+                            eprintln!("file clipboard rejected: {e}")
+                        }
+                        _ => {}
+                    }
+                    // Queue publication before granting commit credit. A sender
+                    // may start its next image/file immediately after this ACK.
                     if writer
                         .write(wire::ack(identity.0, identity.1, status))
                         .is_err()
                     {
                         break;
-                    }
-                    match result {
-                        Ok(Some(batch)) => completed(batch),
-                        Err(e) => eprintln!("file clipboard rejected: {e}"),
-                        _ => {}
                     }
                 }
             })?;
@@ -457,6 +578,7 @@ impl FileSession {
         if !matches!(
             frame.kind,
             FrameKind::FileOffer
+                | FrameKind::FileManifest
                 | FrameKind::FileData
                 | FrameKind::FileSeal
                 | FrameKind::FileCommit
