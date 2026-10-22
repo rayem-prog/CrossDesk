@@ -29,6 +29,7 @@ fn remembered_start_waits_for_authentication_and_disconnect_stays_paused() {
         name: "我的 Windows".into(),
         endpoints: vec!["127.0.0.1:24920".parse().unwrap()],
         pairing_port: Some(24921),
+        protocol: crate::protocol::VERSION,
     };
     let mut core = Core::from_parts(
         "macos",
@@ -50,7 +51,7 @@ fn remembered_start_waits_for_authentication_and_disconnect_stays_paused() {
     core.candidates = vec![peer];
     core.tick().unwrap();
     assert_eq!(core.view().state, "paused");
-    assert_eq!(*state.lock().unwrap(), ServiceState::Stopped);
+    assert_eq!({ *state.lock().unwrap() }, ServiceState::Stopped);
     core.connect().unwrap();
     core.tick().unwrap();
     assert_eq!(core.view().state, "connecting");
@@ -91,6 +92,7 @@ fn disconnect_wins_even_if_pairing_finishes_before_the_next_tick() {
         name: "Windows".into(),
         endpoints: vec!["127.0.0.1:24920".parse().unwrap()],
         pairing_port: None,
+        protocol: crate::protocol::VERSION,
     }];
     c.disconnect().unwrap();
     store.stage([3; 16], &[8; 32]).unwrap();
@@ -124,6 +126,7 @@ fn first_pairing_starts_both_services_and_the_next_launch_needs_no_code() {
         name: "Windows".into(),
         endpoints: vec!["127.0.0.1:24920".parse().unwrap()],
         pairing_port: Some(host.pairing.as_ref().unwrap().local_addr().port()),
+        protocol: crate::protocol::VERSION,
     };
     let mut client = Core::from_parts(
         "macos",
@@ -215,6 +218,7 @@ fn unreachable_virtual_adapter_does_not_hide_a_working_lan_address() {
             "192.168.1.114:24920".parse().unwrap(),
         ],
         pairing_port: None,
+        protocol: crate::protocol::VERSION,
     }];
     let now = Instant::now();
     c.tick_at(now).unwrap();
@@ -246,6 +250,7 @@ fn a_confirmed_pairing_grant_recovers_a_lost_final_ack_without_another_code() {
         name: "Windows".into(),
         endpoints: vec!["127.0.0.1:24920".parse().unwrap()],
         pairing_port: None,
+        protocol: crate::protocol::VERSION,
     }];
     c.tick().unwrap();
     assert_eq!(c.view().state, "connecting");
@@ -304,6 +309,7 @@ fn explicit_first_pair_connects_even_when_next_launch_auto_connect_is_off() {
         name: "Windows".into(),
         endpoints: vec!["127.0.0.1:24920".parse().unwrap()],
         pairing_port: None,
+        protocol: crate::protocol::VERSION,
     }];
     c.command(Command::Select([3; 16])).unwrap();
     store.stage([3; 16], &[8; 32]).unwrap();
@@ -320,5 +326,127 @@ fn explicit_first_pair_connects_even_when_next_launch_auto_connect_is_off() {
     next.tick().unwrap();
     assert_eq!(next.view().state, "paused");
     next.shutdown();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn discovered_devices_expose_compatibility_to_the_connection_ui() {
+    let mut nonce = [0; 8];
+    getrandom::getrandom(&mut nonce).unwrap();
+    let root = std::env::temp_dir().join(format!("crossdesk-version-view-{nonce:x?}"));
+    let store = Arc::new(TrustedStore::new(root.clone()).unwrap());
+    let mut core = Core::from_parts(
+        "macos",
+        store,
+        Box::new(MemoryService(Arc::new(Mutex::new(ServiceState::Stopped)))),
+    )
+    .unwrap();
+    core.candidates = vec![Candidate {
+        id: [3; 16],
+        name: "Windows".into(),
+        endpoints: vec!["127.0.0.1:24920".parse().unwrap()],
+        pairing_port: Some(24921),
+        protocol: crate::protocol::VERSION,
+    }];
+    let view = serde_json::to_value(core.view()).unwrap();
+    assert_eq!(view["devices"][0]["compatible"], true);
+    core.shutdown();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn version_test_core() -> (Core, PathBuf, Arc<Mutex<ServiceState>>) {
+    let mut nonce = [0; 8];
+    getrandom::getrandom(&mut nonce).unwrap();
+    let root = std::env::temp_dir().join(format!("crossdesk-incompatible-{nonce:x?}"));
+    let store = Arc::new(TrustedStore::new(root.clone()).unwrap());
+    let state = Arc::new(Mutex::new(ServiceState::Stopped));
+    let mut core =
+        Core::from_parts("macos", store, Box::new(MemoryService(state.clone()))).unwrap();
+    core.candidates = vec![Candidate {
+        id: [3; 16],
+        name: "Legacy Windows".into(),
+        endpoints: vec!["127.0.0.1:24920".parse().unwrap()],
+        pairing_port: Some(24921),
+        protocol: 6,
+    }];
+    (core, root, state)
+}
+
+#[test]
+fn legacy_device_is_visible_but_cannot_be_selected_or_paired() {
+    let (mut core, root, _) = version_test_core();
+    let view = serde_json::to_value(core.view()).unwrap();
+    assert_eq!(view["devices"][0]["compatible"], false);
+    let error = core
+        .command(Command::Select([3; 16]))
+        .err()
+        .expect("legacy selection must fail");
+    assert!(error.to_string().contains("0.5.0"));
+    assert!(core.selected.is_none());
+    // Discovery may change between selection and submission; check again at PairJob boundary.
+    core.selected = Some([3; 16]);
+    let error = core
+        .command(Command::Pair("123456".into()))
+        .err()
+        .expect("legacy pairing must fail synchronously");
+    assert!(error.to_string().contains("两端"));
+    assert!(core.job.is_none());
+    core.shutdown();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn legacy_discovery_blocks_auto_connect_even_with_a_saved_address() {
+    let (mut core, root, state) = version_test_core();
+    core.store.stage([3; 16], &[8; 32]).unwrap();
+    core.store.commit([3; 16]).unwrap();
+    core.prefs.last_address = Some("127.0.0.1:24920".parse().unwrap());
+    core.opened = Instant::now() - Duration::from_secs(9);
+    core.tick().unwrap();
+    assert_eq!({ *state.lock().unwrap() }, ServiceState::Stopped);
+    assert!(core.view().error.as_deref().unwrap().contains("0.5.0"));
+    let error = core
+        .command(Command::Connect)
+        .err()
+        .expect("explicit reconnect must also reject legacy devices");
+    assert!(error.to_string().contains("两端"));
+    core.candidates.clear();
+    core.tick().unwrap();
+    assert_eq!(
+        { *state.lock().unwrap() },
+        ServiceState::Stopped,
+        "discovery expiry must not bypass a known protocol mismatch"
+    );
+    assert!(!core.view().devices[0].compatible);
+    core.candidates = vec![Candidate {
+        id: [3; 16],
+        name: "Updated Windows".into(),
+        endpoints: vec!["127.0.0.1:24920".parse().unwrap()],
+        pairing_port: None,
+        protocol: 7,
+    }];
+    core.tick().unwrap();
+    assert_eq!({ *state.lock().unwrap() }, ServiceState::Starting);
+    assert!(
+        core.view().error.is_none(),
+        "upgrade must clear the compatibility error"
+    );
+    core.shutdown();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn incompatible_history_keeps_the_trusted_peer_without_accumulating_broadcast_ids() {
+    let (mut core, root, _) = version_test_core();
+    core.store.stage([3; 16], &[8; 32]).unwrap();
+    core.store.commit([3; 16]).unwrap();
+    core.tick().unwrap();
+    for n in 10..50 {
+        core.candidates[0].id = [n; 16];
+        core.tick().unwrap();
+    }
+    assert!(core.incompatible.contains(&[3; 16]));
+    assert!(core.incompatible.len() <= 2);
+    core.shutdown();
     std::fs::remove_dir_all(root).unwrap();
 }

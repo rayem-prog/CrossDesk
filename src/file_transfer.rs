@@ -149,7 +149,7 @@ pub fn sources(files: &[PathBuf]) -> io::Result<Vec<Source>> {
     }
     Ok(out)
 }
-/// Retained only for explicitly opted-in legacy callers. v6 clipboard uses session::FileSender.
+/// Retained only for explicitly opted-in legacy callers. v7 clipboard uses session::FileSender.
 pub fn send_files(writer: &SharedWriter, files: &[PathBuf]) -> io::Result<()> {
     for mut source in sources(files)? {
         writer.write(Frame::new(
@@ -391,4 +391,6 @@ mod review_regressions {
 mod tests;
 
 pub mod session;
+pub mod tree;
+mod tree_cache;
 pub mod wire;

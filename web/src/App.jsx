@@ -3,7 +3,7 @@ import {invoke} from '@tauri-apps/api/core';
 import {ArrowRightLeft,SlidersHorizontal,AlertCircle,ExternalLink} from 'lucide-react';
 import {ConnectHome} from './ConnectHome.jsx';
 import {AdvancedSettings} from './AdvancedSettings.jsx';
-const initial={platform:'macos',state:'starting',devices:[],selectedId:null,error:null,autoConnect:true,imageClipboard:true,fileClipboard:true,logs:[],appVersion:'0.4.0'};
+const initial={platform:'macos',state:'starting',devices:[],selectedId:null,error:null,autoConnect:true,imageClipboard:true,fileClipboard:true,logs:[],appVersion:'0.5.0'};
 export function App({api=invoke,refreshMs=600,preview=false}){
  const [view,setView]=useState(initial),[busy,setBusy]=useState(false),[error,setError]=useState(''),[settings,setSettings]=useState(false);const mounted=useRef(true);const settingsButton=useRef(null);
  useEffect(()=>{mounted.current=true;let timer;const poll=async()=>{try{const state=await api('get_connect_state');if(mounted.current)setView(state);}catch(e){if(mounted.current)setError(String(e));}finally{if(mounted.current)timer=setTimeout(poll,refreshMs);}};poll();return()=>{mounted.current=false;clearTimeout(timer);};},[api,refreshMs]);

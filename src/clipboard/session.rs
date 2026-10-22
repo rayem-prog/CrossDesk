@@ -1,3 +1,4 @@
+use crate::service_event::{TransferDirection, TransferState, transfer as report_transfer};
 // CrossDesk image clipboard changes: 2026-10-20 (GPL-3.0-only).
 use super::{Clipboard, ClipboardApi};
 use crate::file_transfer::{
@@ -34,6 +35,29 @@ impl SyncState {
 }
 fn may_publish_remote(start: u64, current: u64, last_remote: Option<u64>) -> bool {
     start == current || last_remote == Some(current)
+}
+
+// Native revisions connected only by our own publications form one lineage.
+// A new local copy starts a new lineage, so a late older delivery cannot use
+// the last-remote exception to cross that local-copy boundary.
+#[derive(Default)]
+struct PublicationGuard {
+    revisions: std::collections::VecDeque<u64>,
+}
+impl PublicationGuard {
+    fn permits(&mut self, start: u64, current: u64, last_remote: Option<u64>) -> bool {
+        if last_remote != Some(current) {
+            self.revisions.clear();
+            self.revisions.push_back(current);
+        }
+        self.revisions.contains(&start)
+    }
+    fn published(&mut self, revision: u64) {
+        self.revisions.push_back(revision);
+        if self.revisions.len() > 64 {
+            self.revisions.pop_front();
+        }
+    }
 }
 
 struct Delivery {
@@ -188,7 +212,24 @@ impl ClipboardSession {
     }
     pub fn receive(&mut self, frame: Frame) -> io::Result<()> {
         if frame.kind == FrameKind::TransferResult {
-            let (_, status) = wire::parse_result(&frame.payload)?;
+            let (id, status) = wire::parse_result(&frame.payload)?;
+            report_transfer(
+                id,
+                TransferDirection::Send,
+                match status {
+                    0 => TransferState::Ready,
+                    1 => TransferState::Skipped,
+                    _ => TransferState::Failed,
+                },
+                Some(
+                    match status {
+                        0 => "对方已经可以粘贴",
+                        1 => "对方有更新的复制内容，请重新复制后重试",
+                        _ => "对方发布失败，请查看对方日志并重试",
+                    }
+                    .into(),
+                ),
+            );
             eprintln!(
                 "destination clipboard result: {}",
                 match status {
@@ -260,6 +301,7 @@ fn worker_loop<C: ClipboardApi>(
 ) {
     let mut state = SyncState::default();
     let mut last_remote_revision = None;
+    let mut publication_guard = PublicationGuard::default();
     let cache = std::env::temp_dir().join("crossdesk-image-clipboard");
     // Initialize the platform boundary without ever transmitting startup contents.
     let _ = clipboard.read();
@@ -268,28 +310,54 @@ fn worker_loop<C: ClipboardApi>(
         let incoming = mailbox.pending.lock().unwrap().take();
         if let Some(delivery) = incoming {
             let id = delivery.id();
-            let result = match delivery {
-                RemoteDelivery::Image(delivery) => apply_delivery(
-                    &mut clipboard,
-                    delivery,
-                    &cache,
-                    last_remote_revision,
-                    &mut state,
-                ),
-                RemoteDelivery::Files(mut batch) => {
-                    apply_file_delivery(&mut clipboard, &mut batch, last_remote_revision)
-                }
+            let started = match &delivery {
+                RemoteDelivery::Image(d) => d.revision,
+                RemoteDelivery::Files(b) => b.revision,
+            };
+            let can_publish = clipboard
+                .change_id()
+                .map(|current| publication_guard.permits(started, current, last_remote_revision));
+            let result = match can_publish {
+                Err(e) => Err(e),
+                Ok(false) => Ok(None),
+                Ok(true) => match delivery {
+                    RemoteDelivery::Image(delivery) => apply_delivery(
+                        &mut clipboard,
+                        delivery,
+                        &cache,
+                        last_remote_revision,
+                        &mut state,
+                    ),
+                    RemoteDelivery::Files(mut batch) => {
+                        apply_file_delivery(&mut clipboard, &mut batch, last_remote_revision)
+                    }
+                },
             };
             let status = match &result {
                 Ok(Some(_)) => 0,
                 Ok(None) => 1,
                 Err(_) => 2,
             };
+            report_transfer(
+                id,
+                TransferDirection::Receive,
+                match status {
+                    0 => TransferState::Ready,
+                    1 => TransferState::Skipped,
+                    _ => TransferState::Failed,
+                },
+                Some(match &result {
+                    Err(e) => e.to_string(),
+                    Ok(None) => "已有更新的本地复制内容；请在发送端重新复制".into(),
+                    _ => "可在 Finder 或资源管理器中粘贴".into(),
+                }),
+            );
             let _ = writer.write(wire::result(id, status));
             match result {
                 Ok(Some(next)) => {
                     revision = next;
                     last_remote_revision = Some(next);
+                    publication_guard.published(next);
                 }
                 Err(e) => eprintln!("clipboard publication failed: {e}"),
                 _ => {}

@@ -28,7 +28,7 @@ fi
 if [[ "$task_address" != *:* ]]; then task_address="${task_address}:24920"; fi
 printf '%s\n' "$task_address" > "$task_root/mac-server.txt"
 chmod 600 "$task_root/crossdesk.key"
-echo 'Both computers must run CrossDesk 0.3.0 / protocol v6.'
+echo 'Both computers must run CrossDesk 0.5.0 / protocol v7.'
 echo 'Enable Terminal/CrossDesk under Privacy & Security > Accessibility.'
 echo 'Copy an image or file after connecting; clipboard sync is on by default.'
 echo 'Ctrl+C stops the client. Network failures automatically retry.'

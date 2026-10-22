@@ -1,4 +1,4 @@
-// Initial pairing is separate from the unchanged v6 data channel.
+// Initial pairing is separate from the versioned data channel (v7 for CrossDesk 0.5.0).
 use super::PairingWindow;
 use crate::trust_store::{DeviceId, TrustedStore};
 use sha2::{Digest, Sha256};

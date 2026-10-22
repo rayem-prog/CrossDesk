@@ -631,9 +631,27 @@ mod tests {
                 .write_if_current(&ClipboardPayload::Bitmap(png()), before)
                 .unwrap()
         );
+        let folder = std::env::temp_dir().join(format!("CrossDesk-folders-{}", std::process::id()));
+        let empty_folder = folder.join("空目录 café");
+        std::fs::create_dir_all(&empty_folder).unwrap();
+        std::fs::write(folder.join(".hidden"), b"nested content").unwrap();
+        for paths in [
+            vec![empty_folder.clone()],
+            vec![folder.clone(), pdf.clone(), empty.clone()],
+        ] {
+            let selection = ClipboardPayload::Files(paths);
+            clipboard.write(&selection).unwrap();
+            assert_eq!(clipboard.read().unwrap(), Some(selection));
+        }
+        assert_eq!(
+            std::fs::read(folder.join(".hidden")).unwrap(),
+            b"nested content"
+        );
+        assert_eq!(std::fs::read_dir(&empty_folder).unwrap().count(), 0);
         clipboard.write(&ClipboardPayload::Text("".into())).unwrap();
         std::fs::remove_file(path).unwrap();
         std::fs::remove_file(pdf).unwrap();
         std::fs::remove_file(empty).unwrap();
+        std::fs::remove_dir_all(folder).unwrap();
     }
 }

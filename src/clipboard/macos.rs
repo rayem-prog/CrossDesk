@@ -642,6 +642,55 @@ mod ordinary_file_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn named_pasteboard_round_trips_empty_folder_and_mixed_folder_file_selection() {
+        let name = format!("org.crossdesk.folders.{}", std::process::id());
+        let root =
+            std::env::temp_dir().join(format!("crossdesk-native-folders-{}", std::process::id()));
+        let empty = root.join("空目录 café");
+        let folder = root.join("资料 folder");
+        let document = root.join("报告.pdf");
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::create_dir_all(folder.join("nested/empty")).unwrap();
+        std::fs::write(folder.join("nested/.hidden"), b"nested content").unwrap();
+        std::fs::write(&document, b"%PDF mixed").unwrap();
+        for paths in [
+            vec![empty.clone()],
+            vec![folder.clone(), document.clone(), empty.clone()],
+        ] {
+            isolated(WRITE_FILES_SCRIPT, &name, &file_input(&paths).unwrap());
+            let read = String::from_utf8(isolated(READ_FILES_SCRIPT, &name, &[])).unwrap();
+            let received: Vec<_> = read.lines().map(PathBuf::from).collect();
+            assert_eq!(received.len(), paths.len());
+            // NSURL may return decomposed Unicode on macOS. The selected
+            // filesystem objects must survive even when path spelling changes.
+            assert!(crate::clipboard::same_payload(
+                &ClipboardPayload::Files(received.clone()),
+                &ClipboardPayload::Files(paths),
+            ));
+            if received.len() == 1 {
+                assert!(received[0].is_dir());
+                assert_eq!(std::fs::read_dir(&received[0]).unwrap().count(), 0);
+            } else {
+                assert!(received[0].join("nested/empty").is_dir());
+                assert_eq!(
+                    std::fs::read(received[0].join("nested/.hidden")).unwrap(),
+                    b"nested content"
+                );
+                assert_eq!(std::fs::read(&received[1]).unwrap(), b"%PDF mixed");
+                assert!(received[2].is_dir());
+                assert_eq!(std::fs::read_dir(&received[2]).unwrap().count(), 0);
+            }
+            assert!(isolated(READ_BITMAP_SCRIPT, &name, &[]).is_empty());
+        }
+        assert_eq!(
+            std::fs::read(folder.join("nested/.hidden")).unwrap(),
+            b"nested content"
+        );
+        assert_eq!(std::fs::read_dir(&empty).unwrap().count(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn named_pasteboard_publication_receipt_precedes_a_subsequent_local_copy() {
         let name = format!("org.crossdesk.receipt.{}", std::process::id());
         let count_script = "ObjC.import('AppKit'); ObjC.import('Foundation'); $.NSFileHandle.fileHandleWithStandardOutput.writeData($(String(Number($.NSPasteboard.generalPasteboard.changeCount))).dataUsingEncoding($.NSUTF8StringEncoding));";
