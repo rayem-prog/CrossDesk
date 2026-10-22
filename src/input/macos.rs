@@ -573,8 +573,8 @@ impl InputSink {
     }
 
     fn mouse_delta(&mut self, dx: i32, dy: i32) -> std::io::Result<()> {
-        let x = self.mouse_position.x as i32 + dx;
-        let y = self.mouse_position.y as i32 + dy;
+        let x = translated_mouse_axis(self.mouse_position.x as i32, dx, self.screen_size.0);
+        let y = translated_mouse_axis(self.mouse_position.y as i32, dy, self.screen_size.1);
         self.set_mouse_position(x, y);
         self.post_pointer_motion(dx, dy)
     }
@@ -1145,4 +1145,32 @@ pub fn screen_size() -> (u32, u32) {
 fn screen_size_i32() -> (i32, i32) {
     let (width, height) = screen_size();
     (width.max(1) as i32, height.max(1) as i32)
+}
+
+// Pure position arithmetic; keeps native event deltas independent of clamping.
+fn translated_mouse_axis(position: i32, delta: i32, extent: i32) -> i32 {
+    position
+        .saturating_add(delta)
+        .clamp(0, extent.saturating_sub(1))
+}
+
+#[cfg(test)]
+mod position_tests {
+    use super::translated_mouse_axis;
+
+    #[test]
+    fn coalesced_extreme_motion_clamps_without_integer_overflow() {
+        assert_eq!(translated_mouse_axis(8, i32::MAX, 1920), 1919);
+        assert_eq!(translated_mouse_axis(8, i32::MIN, 1920), 0);
+        assert_eq!(translated_mouse_axis(0, i32::MAX, 1), 0);
+    }
+
+    #[test]
+    fn ordinary_motion_and_reversal_keep_stepwise_edge_clipping() {
+        assert_eq!(translated_mouse_axis(8, 3, 20), 11);
+        assert_eq!(translated_mouse_axis(8, -3, 20), 5);
+        let edge = translated_mouse_axis(8, 4, 10);
+        assert_eq!(edge, 9);
+        assert_eq!(translated_mouse_axis(edge, -2, 10), 7);
+    }
 }

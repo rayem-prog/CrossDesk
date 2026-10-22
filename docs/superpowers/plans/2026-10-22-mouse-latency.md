@@ -22,31 +22,31 @@ Files: new `src/input/queue.rs`; modify `src/input/mod.rs`, `src/client.rs`; tes
 
 Interface: `EventQueue::new(usize)`, `push(InputEvent)->io::Result<()>`, `try_pop()->Option<TimedInput>`, `recv()->Option<TimedInput>`, `recv_timeout(Duration)->Option<TimedInput>`, `close()`, `is_closed()`, `len()`; `TimedInput {event,enqueued:Instant,samples:u64}`; `merge_motion(&mut InputEvent,&InputEvent)->bool`.
 
-- [ ] Write and run failing tests for ordered coalescing, reversals, edge-clamp equivalence, checked overflow, control barriers, bounded flood, overflow and close wakeup.
-- [ ] Implement queue with Mutex/Condvar and conservative merging, retain original timestamp/sample count.
-- [ ] Replace client blocking sync_channel with shared queue; propagate overflow to session shutdown and retain InputSink drop cleanup.
-- [ ] Inject a fake input boundary in worker tests; verify no startup work, exact event sequence and stop cleanup without native posting.
+- [x] Write and run failing tests for ordered coalescing, reversals, edge-clamp equivalence, checked overflow, control barriers, bounded flood, overflow and close wakeup.
+- [x] Implement queue with Mutex/Condvar and conservative merging, retain original timestamp/sample count.
+- [x] Replace client blocking sync_channel with shared queue; propagate overflow to session shutdown and retain InputSink drop cleanup.
+- [x] Inject a fake input boundary in worker tests; verify no startup work, exact event sequence and stop cleanup without native posting.
 
 ## Task 2: Windows pacing and timer (Windows agent)
 
 Files: new `src/input/pacing.rs`, `src/input/wait_windows.rs`; source sender section of `src/server/windows.rs`; Windows features in Cargo.toml.
 
-- [ ] First write deterministic deadline tests showing first motion is immediate, continuous motion bounded by deadlines, nonmergeable motion/control boundaries flush in order, and close does not replay pending events.
-- [ ] Replace unbounded sender with EventQueue and an interruptible event/timer wait; native hook only pushes and signals.
-- [ ] Use CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, fall back to a normal timer, close every handle; verify native wait/notification in disposable Windows tests.
-- [ ] Cross-compile with tests and retain all pointer/input regressions.
+- [x] First write deterministic deadline tests showing first motion is immediate, continuous motion bounded by deadlines, nonmergeable motion/control boundaries flush in order, and close does not replay pending events.
+- [x] Replace unbounded sender with EventQueue and an interruptible event/timer wait; native hook only pushes and signals.
+- [x] Use CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, fall back to a normal timer, close every handle; add native wait/notification regressions for disposable Windows CI (execution pending delivery).
+- [x] Cross-compile with tests and retain all pointer/input regressions.
 
 ## Task 3: Fixed-memory timing statistics (metrics agent)
 
 File: new `src/input/latency.rs` only; root registers module. API and call sites coordinated with root/Windows agent.
 
-- [ ] Write failing literal-bucket tests for percentile rank, overflow, disabled path and bounded periodic reports.
-- [ ] Implement aggregate recorder for SendQueue, SendWrite, ReceiveQueue, Inject, PacingLate; bounded histogram and content-free output.
-- [ ] Root and Windows agent record stage durations and queue depth/sample counts; report at most once every 5 seconds when enabled.
+- [x] Write failing literal-bucket tests for percentile rank, overflow, disabled path and bounded periodic reports.
+- [x] Implement aggregate recorder for SendQueue, SendWrite, ReceiveQueue, Inject, PacingLate; bounded histogram and content-free output.
+- [x] Root and Windows agent record stage durations and queue depth/sample counts; report at most once every 5 seconds when enabled.
 
 ## Task 4: Regression, packaging and delivery (root)
 
-- [ ] Run Rust GUI/CLI, receiver/queue/pacing/metrics tests, web regression, formatting and Windows test cross-check.
-- [ ] Bump own versions to 0.6.1 (keep spake2 0.4.0 and protocol 7), document metrics and timing limits.
+- [x] Run Rust GUI/CLI, receiver/queue/pacing/metrics tests, web regression, formatting and Windows test cross-check.
+- [x] Bump own versions to 0.6.1 (keep spake2 0.4.0 and protocol 7), document metrics and timing limits.
 - [ ] Push branch based on c7f1f3b, create draft PR based on codex/text-clipboard, attach PR and run native CI.
 - [ ] Build Mac app and download Windows installer with matching source packages; record checks actually passed and deliver without physical acceptance.
