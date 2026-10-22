@@ -41,6 +41,7 @@ impl SharedWriter {
                 | FrameKind::Pong
                 | FrameKind::FileAck
                 | FrameKind::FileCancel
+                | FrameKind::TextCancel
                 | FrameKind::TransferResult
         );
         let _permit = self.inner.acquire(input_priority);
@@ -93,6 +94,11 @@ pub fn clipboard_enabled() -> bool {
 pub fn image_clipboard_enabled() -> bool {
     cfg!(any(windows, target_os = "macos"))
         && std::env::var("CROSSDESK_IMAGE_CLIPBOARD").map_or(true, |v| v != "off")
+}
+
+pub fn text_clipboard_enabled() -> bool {
+    cfg!(any(windows, target_os = "macos"))
+        && std::env::var("CROSSDESK_TEXT_CLIPBOARD").map_or(true, |v| v != "off")
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@ use super::*;
 #[serde(default, rename_all = "camelCase")]
 pub struct Preferences {
     pub auto_connect: bool,
+    pub text_clipboard: bool,
     pub image_clipboard: bool,
     pub file_clipboard: bool,
     pub last_address: Option<SocketAddr>,
@@ -12,6 +13,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             auto_connect: true,
+            text_clipboard: true,
             image_clipboard: true,
             file_clipboard: true,
             last_address: None,

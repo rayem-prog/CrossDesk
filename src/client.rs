@@ -85,10 +85,11 @@ fn run_session(server: &str, key: &[u8; 32]) -> std::io::Result<()> {
         writer.clone(),
         crate::transport::image_clipboard_enabled() && server_hello.image_clipboard,
         crate::transport::file_clipboard_enabled() && server_hello.file_clipboard,
+        crate::transport::text_clipboard_enabled() && server_hello.text_clipboard,
     )?;
-    if !images.enabled() {
-        spawn_clipboard_watcher(writer.clone(), Arc::clone(&clipboard_state));
-    }
+    crate::service_event::capabilities(
+        crate::transport::text_clipboard_enabled() && server_hello.text_clipboard,
+    );
     let mut input_log = InputLog::new();
     crate::service_event::emit(crate::service_event::ServiceState::Connected, None);
 
@@ -123,15 +124,6 @@ fn run_session(server: &str, key: &[u8; 32]) -> std::io::Result<()> {
                 let event = protocol::decode_input(&frame.payload)?;
                 input_log.observe(&event);
                 input.send(event);
-            }
-            FrameKind::Clipboard => {
-                let payload = protocol::decode_clipboard(&frame.payload)?;
-                eprintln!("received clipboard {}", clipboard_summary(&payload));
-                if let Err(e) = clipboard.write(&payload) {
-                    eprintln!("clipboard write failed: {e}");
-                } else {
-                    note_remote_clipboard(&clipboard_state, &payload);
-                }
             }
             FrameKind::FileStart => {
                 let (relative, len) = protocol::decode_file_start(&frame.payload)?;

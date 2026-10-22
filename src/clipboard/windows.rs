@@ -148,6 +148,11 @@ impl Clipboard {
         if let ClipboardPayload::Bitmap(data) = payload {
             crate::image_transfer::decode_image(data)?;
         }
+        // Validate and encode text before EmptyClipboard can affect the destination.
+        let text_bytes = match payload {
+            ClipboardPayload::Text(text) => Some(encode_text(text)?),
+            _ => None,
+        };
         // Precompute the optional bitmap before opening the shared system clipboard.
         let extra = match payload {
             ClipboardPayload::Files(files) if files.len() == 1 => {
@@ -166,7 +171,10 @@ impl Clipboard {
             return Err(last_os_error("EmptyClipboard failed"));
         }
         let result = match payload {
-            ClipboardPayload::Text(text) => write_text(text),
+            ClipboardPayload::Text(_) => set_clipboard_bytes(
+                CF_UNICODETEXT as u32,
+                text_bytes.as_deref().expect("text was prepared"),
+            ),
             ClipboardPayload::Bitmap(bitmap) => write_bitmap(bitmap),
             ClipboardPayload::Files(files) => {
                 write_files(files)?;
@@ -210,35 +218,42 @@ fn read_text() -> std::io::Result<Option<String>> {
     if handle.is_null() {
         return Ok(None);
     }
-    let bytes = copy_global(handle as HGLOBAL)?;
-    let words = bytes
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-        .take_while(|ch| *ch != 0)
-        .collect::<Vec<_>>();
-    if words.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(String::from_utf16_lossy(&words)))
-    }
+    let bytes = copy_global_bounded(
+        handle as HGLOBAL,
+        (crate::text_transfer::MAX_TEXT_BYTES * 2 + 1) * 2,
+    )?;
+    decode_text(&bytes).map(Some)
 }
 
-fn write_text(text: &str) -> std::io::Result<()> {
-    let mut wide = text.encode_utf16().collect::<Vec<_>>();
-    wide.push(0);
-    let bytes = wide
-        .iter()
-        .flat_map(|ch| ch.to_le_bytes())
-        .collect::<Vec<_>>();
-    set_clipboard_bytes(CF_UNICODETEXT as u32, &bytes)?;
+fn decode_text(bytes: &[u8]) -> std::io::Result<String> {
+    if bytes.len() % 2 != 0 {
+        return Err(invalid_data("odd-sized UTF-16 clipboard text"));
+    }
+    let mut words = Vec::with_capacity(bytes.len() / 2);
+    let mut terminated = false;
+    for chunk in bytes.chunks_exact(2) {
+        let word = u16::from_le_bytes([chunk[0], chunk[1]]);
+        if word == 0 {
+            terminated = true;
+            break;
+        }
+        words.push(word);
+    }
+    if !terminated {
+        return Err(invalid_data("unterminated UTF-16 clipboard text"));
+    }
+    let text =
+        String::from_utf16(&words).map_err(|_| invalid_data("invalid UTF-16 clipboard text"))?;
+    crate::text_transfer::normalize(&text)
+}
 
-    let mut ansi = text
-        .chars()
-        .map(|ch| if ch.is_ascii() { ch as u8 } else { b'?' })
-        .collect::<Vec<_>>();
-    ansi.push(0);
-    let _ = set_clipboard_bytes(CF_TEXT as u32, &ansi);
-    Ok(())
+fn encode_text(text: &str) -> std::io::Result<Vec<u8>> {
+    let text = crate::text_transfer::normalize(text)?.replace('\n', "\r\n");
+    Ok(text
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .flat_map(u16::to_le_bytes)
+        .collect())
 }
 
 fn read_narrow_text(format: u32) -> std::io::Result<Option<String>> {
@@ -246,7 +261,10 @@ fn read_narrow_text(format: u32) -> std::io::Result<Option<String>> {
     if handle.is_null() {
         return Ok(None);
     }
-    let bytes = copy_global(handle as HGLOBAL)?;
+    let bytes = copy_global_bounded(
+        handle as HGLOBAL,
+        crate::text_transfer::MAX_TEXT_BYTES * 2 + 1,
+    )?;
     let text = bytes
         .split(|byte| *byte == 0)
         .next()
@@ -257,7 +275,7 @@ fn read_narrow_text(format: u32) -> std::io::Result<Option<String>> {
     if text.is_empty() {
         Ok(None)
     } else {
-        Ok(Some(text))
+        crate::text_transfer::normalize(&text).map(Some)
     }
 }
 
@@ -378,12 +396,16 @@ fn write_files(files: &[PathBuf]) -> std::io::Result<()> {
 }
 
 fn copy_global(handle: HGLOBAL) -> std::io::Result<Vec<u8>> {
+    copy_global_bounded(handle, crate::image_transfer::MAX_IMAGE_BYTES)
+}
+
+fn copy_global_bounded(handle: HGLOBAL, max_bytes: usize) -> std::io::Result<Vec<u8>> {
     let len = unsafe { GlobalSize(handle) };
     if len == 0 {
         return Ok(Vec::new());
     }
-    if len > crate::image_transfer::MAX_IMAGE_BYTES {
-        return Err(std::io::Error::other("clipboard item exceeds 32 MiB"));
+    if len > max_bytes {
+        return Err(invalid_data("clipboard item exceeds native size bound"));
     }
     let ptr = unsafe { GlobalLock(handle) as *const u8 };
     if ptr.is_null() {
@@ -551,6 +573,22 @@ fn last_os_error(context: &str) -> std::io::Error {
 mod tests {
     use super::*;
 
+    #[test]
+    fn text_decoder_rejects_invalid_utf16_and_preserves_unicode_with_lf() {
+        assert!(decode_text(&[0x00, 0xd8, 0, 0]).is_err());
+        assert!(decode_text(&[b'x', 0]).is_err());
+        assert!(decode_text(&[0]).is_err());
+        assert!(decode_text(&[0, 0]).is_err());
+        let bytes = [0x20, 0, 0x2d, 0x4e, 0x0d, 0, 0x0a, 0, 0x09, 0, 0, 0];
+        assert_eq!(decode_text(&bytes).unwrap(), " 中\n\t");
+        assert_eq!(
+            encode_text("a\nb\rc\r\nd").unwrap(),
+            [
+                97, 0, 13, 0, 10, 0, 98, 0, 13, 0, 10, 0, 99, 0, 13, 0, 10, 0, 100, 0, 0, 0
+            ]
+        );
+    }
+
     fn png() -> Vec<u8> {
         let image = image::RgbaImage::from_raw(2, 1, vec![255, 0, 0, 255, 0, 255, 0, 127]).unwrap();
         let mut bytes = Cursor::new(Vec::new());
@@ -648,7 +686,72 @@ mod tests {
             b"nested content"
         );
         assert_eq!(std::fs::read_dir(&empty_folder).unwrap().count(), 0);
-        clipboard.write(&ClipboardPayload::Text("".into())).unwrap();
+        let text = ClipboardPayload::Text(" \t中文 café 😀\r\nline\rnext\n \t".into());
+        let expected_text = ClipboardPayload::Text(" \t中文 café 😀\nline\nnext\n \t".into());
+        let before = clipboard.change_id().unwrap();
+        let receipt = clipboard
+            .publish_revision_if_current(&text, before)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt, clipboard.change_id().unwrap());
+        assert_eq!(clipboard.read().unwrap(), Some(expected_text.clone()));
+        assert_eq!(
+            clipboard
+                .publish_revision_if_current(&ClipboardPayload::Text("stale".into()), before)
+                .unwrap(),
+            None
+        );
+        for invalid in ["".to_owned(), "bad\0text".to_owned(), "x".repeat(1_048_577)] {
+            assert!(clipboard.write(&ClipboardPayload::Text(invalid)).is_err());
+            assert_eq!(clipboard.change_id().unwrap(), receipt);
+            assert_eq!(clipboard.read().unwrap(), Some(expected_text.clone()));
+        }
+        {
+            let _guard = ClipboardGuard::open(ptr::null_mut()).unwrap();
+            let handle = unsafe { GetClipboardData(CF_UNICODETEXT as u32) };
+            let bytes = copy_global(handle as HGLOBAL).unwrap();
+            let wide = bytes
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .take_while(|c| *c != 0)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                String::from_utf16(&wide).unwrap(),
+                " \t中文 café 😀\r\nline\r\nnext\r\n \t"
+            );
+        }
+        // Exercise the UTF-8 limit at the native boundary, including the largest
+        // UTF-16 allocation after Windows CRLF expansion.
+        for maximum in [
+            "x".repeat(1_048_576),
+            "\n".repeat(1_048_576),
+            "🙂".repeat(262_144),
+        ] {
+            clipboard
+                .write(&ClipboardPayload::Text(maximum.clone()))
+                .unwrap();
+            assert_eq!(
+                clipboard.read().unwrap(),
+                Some(ClipboardPayload::Text(maximum))
+            );
+        }
+        clipboard
+            .write(&ClipboardPayload::Text("local copy".into()))
+            .unwrap();
+        assert!(clipboard.change_id().unwrap() > receipt);
+        assert_eq!(
+            clipboard
+                .publish_revision_if_current(&text, receipt)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            clipboard.read().unwrap(),
+            Some(ClipboardPayload::Text("local copy".into()))
+        );
+        clipboard
+            .write(&ClipboardPayload::Text(" ".into()))
+            .unwrap();
         std::fs::remove_file(path).unwrap();
         std::fs::remove_file(pdf).unwrap();
         std::fs::remove_file(empty).unwrap();

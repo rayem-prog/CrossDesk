@@ -1,3 +1,28 @@
+# CrossDesk 0.6.0 validation — 2026-10-22
+
+## Current implementation and verification
+
+Plain-text clipboard transfer is memory-only and defaults on independently of images/files. Protocol remains v7, with bit 0x04 negotiated in Hello and TextStart/Chunk/End/Cancel frames 24–27. No text frame is sent to a 0.5.0 peer. Both local and remote options gate the common session; the primary endpoints reject the legacy raw Clipboard message and no longer start its experimental watcher.
+
+Text is normalized to LF without trimming; Windows publishes CRLF using CF_UNICODETEXT. Normalized UTF-8 is limited to 1 MiB, chunks to 16 KiB, the existing frame cap to 64 KiB. Empty, NUL, malformed encoding, noncanonical wire newlines, bad offsets/identities/lengths/hashes and oversize input are rejected as whole transfers. SHA-256 verification precedes native publication. Each direction holds one text assembly; a separate expiry worker discards assemblies after 30 seconds without progress even while the clipboard worker is sending files. Disconnect releases unfinished memory. No text history/cache or body logging is added.
+
+The existing common publication queue and native revision lineage protect newer local copies across text/images/files. Explicit identical text recopy creates a new ID; confirmed remote publication advances observation without echoing. Native publication validates before clearing, checks the current revision and obtains an origin/revision receipt. macOS tests use named pasteboards; Windows clipboard runtime tests execute only on disposable GitHub runners.
+
+Automated tests cover normalization and whitespace, Chinese/emoji, 1 MiB and multiframe UTF-8 boundaries, invalid native/wire text, idle timeout, cancellation, bidirectional encrypted publication, no startup or reconnect replay, same-content retry, newer local copy protection, cross-format lineage, legacy capability downgrade while files continue, text-only mode, preference migration, CLI validation, structured capability/transfer IPC lifecycle and accessible UI states. Local final run: GUI Rust 167 passed / 3 ignored (subprocess fixtures and the explicit large-file test); CLI Rust 129 passed / 2 ignored; React 25 passed; source-packaging regression 1 passed. Native Mac tests (14 named-pasteboard cases), formatting and Windows target checking including tests pass. The existing Windows-only unused_mut warning is unchanged. Native CI and package results will be recorded in the delivery build record.
+
+## Physical two-device text acceptance — pending
+
+1. Install both 0.6.0 test packages using existing pairing. Copy Chinese/emoji, multiline code, indentation, leading/trailing spaces and blank lines in both directions into Notepad, TextEdit (plain text) and a code editor.
+2. Verify LF/CRLF behavior, repeated identical copies, empty copy and oversize rejection without clearing the target. Copy locally during incoming text and confirm the newer target copy survives.
+3. Alternate screenshots, folders and text; interrupt Wi-Fi and reconnect. Old contents must not replay; a fresh copy must work.
+4. Disconnect, turn text off on either end, reconnect, and verify neither direction sends text while images/files still work. Enable only text and verify both directions. Repeat with a 0.5.0 peer and verify the truthful unavailable hint with existing file/folder transfer.
+
+These hardware and target-application checks have not been claimed as passed. No merge or formal release occurs before actual two-device acceptance.
+
+---
+
+## Prior 0.5.0 baseline
+
 # CrossDesk 0.5.0 validation — 2026-10-22
 
 ## Current implementation

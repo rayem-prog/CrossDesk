@@ -7,6 +7,7 @@ use crate::file_transfer::{
 };
 use crate::image_transfer::{self, Incoming, Transfer};
 use crate::protocol::{ClipboardPayload, Frame, FrameKind};
+use crate::text_transfer;
 use crate::transport::SharedWriter;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -67,12 +68,23 @@ struct Delivery {
 enum RemoteDelivery {
     Image(Delivery),
     Files(CompletedBatch),
+    Text(TextDelivery),
+}
+struct TextDelivery {
+    transfer: text_transfer::Transfer,
+    revision: u64,
+}
+#[derive(Default)]
+struct TextReceiver {
+    incoming: text_transfer::Incoming,
+    revision: u64,
 }
 impl RemoteDelivery {
     fn id(&self) -> [u8; 16] {
         match self {
             Self::Image(v) => v.transfer.id,
             Self::Files(v) => v.id,
+            Self::Text(v) => v.transfer.id,
         }
     }
 }
@@ -87,6 +99,9 @@ struct Mailbox {
     pending: Mutex<Option<RemoteDelivery>>,
     file_sender: Mutex<Option<FileSender>>,
     images_enabled: AtomicBool,
+    texts_enabled: AtomicBool,
+    text_receiver: Mutex<TextReceiver>,
+    sent_text: Mutex<std::collections::VecDeque<[u8; 16]>>,
     changed: Condvar,
     stop: AtomicBool,
 }
@@ -97,6 +112,9 @@ impl Default for Mailbox {
             pending: Mutex::new(None),
             file_sender: Mutex::new(None),
             images_enabled: AtomicBool::new(true),
+            texts_enabled: AtomicBool::new(false),
+            text_receiver: Mutex::new(TextReceiver::default()),
+            sent_text: Mutex::new(std::collections::VecDeque::new()),
             changed: Condvar::new(),
             stop: AtomicBool::new(false),
         }
@@ -113,6 +131,7 @@ pub struct ClipboardSession {
     probe: Option<Clipboard>,
     mailbox: Arc<Mailbox>,
     worker: Option<JoinHandle<()>>,
+    expiry_worker: Option<JoinHandle<()>>,
 }
 
 impl ClipboardSession {
@@ -120,12 +139,14 @@ impl ClipboardSession {
         writer: SharedWriter,
         image_enabled: bool,
         file_enabled: bool,
+        text_enabled: bool,
     ) -> io::Result<Self> {
-        let enabled = image_enabled || file_enabled;
+        let enabled = image_enabled || file_enabled || text_enabled;
         let mailbox = Arc::new(Mailbox::default());
         mailbox
             .images_enabled
             .store(image_enabled, Ordering::Release);
+        mailbox.texts_enabled.store(text_enabled, Ordering::Release);
         let file_session = if file_enabled {
             let target = mailbox.clone();
             let replies = writer.clone();
@@ -188,7 +209,15 @@ impl ClipboardSession {
                 "off (disabled by one of the peers)"
             }
         );
-        Ok(Self {
+        eprintln!(
+            "text clipboard: {}",
+            if text_enabled {
+                "on (plain text, up to 1 MiB)"
+            } else {
+                "off (peer disabled or unsupported)"
+            }
+        );
+        let mut session = Self {
             enabled,
             image_enabled,
             file_session,
@@ -198,22 +227,64 @@ impl ClipboardSession {
             probe,
             mailbox,
             worker,
-        })
+            expiry_worker: None,
+        };
+        if text_enabled {
+            let target = session.mailbox.clone();
+            let replies = session.writer.clone();
+            session.expiry_worker = Some(
+                thread::Builder::new()
+                    .name("text-clipboard-expiry".into())
+                    .spawn(move || {
+                        while !target.stop.load(Ordering::Acquire) {
+                            expire_text(&target, &replies);
+                            thread::sleep(Duration::from_millis(200));
+                        }
+                    })?,
+            );
+        }
+        Ok(session)
     }
     pub fn enabled(&self) -> bool {
         self.enabled
     }
     pub fn handles(kind: FrameKind) -> bool {
         wire::handles(kind)
+            || text_transfer::handles(kind)
+            || kind == FrameKind::Clipboard
             || matches!(
                 kind,
                 FrameKind::ImageStart | FrameKind::ImageChunk | FrameKind::ImageEnd
             )
     }
     pub fn receive(&mut self, frame: Frame) -> io::Result<()> {
+        // The legacy single-frame path never bypasses negotiated options or revision protection.
+        if frame.kind == FrameKind::Clipboard {
+            return Err(image_transfer::invalid(
+                "legacy clipboard publication is disabled",
+            ));
+        }
+        if text_transfer::handles(frame.kind) {
+            let revision = if frame.kind == FrameKind::TextStart {
+                self.probe
+                    .as_ref()
+                    .map(ClipboardApi::change_id)
+                    .transpose()?
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            return receive_text(frame, revision, &self.mailbox, &self.writer);
+        }
         if frame.kind == FrameKind::TransferResult {
             let (id, status) = wire::parse_result(&frame.payload)?;
-            report_transfer(
+            let is_text = self.mailbox.sent_text.lock().unwrap().contains(&id);
+            let report = if is_text {
+                crate::service_event::text_transfer
+            } else {
+                report_transfer
+            };
+            report(
                 id,
                 TransferDirection::Send,
                 match status {
@@ -290,7 +361,216 @@ impl Drop for ClipboardSession {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+        if let Some(worker) = self.expiry_worker.take() {
+            let _ = worker.join();
+        }
     }
+}
+
+fn text_status(id: [u8; 16], direction: TransferDirection, state: TransferState, message: &str) {
+    crate::service_event::text_transfer(id, direction, state, Some(message.into()));
+}
+
+fn receive_text(
+    frame: Frame,
+    revision: u64,
+    mailbox: &Mailbox,
+    writer: &SharedWriter,
+) -> io::Result<()> {
+    let id = text_transfer::identity(&frame);
+    if !mailbox.texts_enabled.load(Ordering::Acquire) {
+        if let Some(id) = id {
+            let _ = writer.write(wire::result(id, 2));
+        }
+        return Err(image_transfer::invalid(
+            "text synchronization was not negotiated",
+        ));
+    }
+    let mut receiver = mailbox.text_receiver.lock().unwrap();
+    let cancelled =
+        frame.kind == FrameKind::TextCancel && id.is_some() && receiver.incoming.active_id() == id;
+    if frame.kind == FrameKind::TextStart {
+        if let Some(old) = receiver.incoming.active_id() {
+            let _ = writer.write(wire::result(old, 1));
+        }
+        receiver.revision = revision;
+        if let Some(id) = id {
+            text_status(
+                id,
+                TransferDirection::Receive,
+                TransferState::Transferring,
+                "正在接收文字",
+            );
+        }
+    }
+    match receiver.incoming.receive(frame) {
+        Ok(Some(transfer)) => {
+            enqueue(
+                mailbox,
+                RemoteDelivery::Text(TextDelivery {
+                    transfer,
+                    revision: receiver.revision,
+                }),
+                writer,
+            );
+            Ok(())
+        }
+        Ok(None) => {
+            if cancelled {
+                let id = id.unwrap();
+                let _ = writer.write(wire::result(id, 1));
+                text_status(
+                    id,
+                    TransferDirection::Receive,
+                    TransferState::Skipped,
+                    "发送端已取消或复制了新内容",
+                );
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if let Some(id) = id {
+                let _ = writer.write(wire::result(id, 2));
+                text_status(
+                    id,
+                    TransferDirection::Receive,
+                    TransferState::Failed,
+                    &error.to_string(),
+                );
+            }
+            Err(error)
+        }
+    }
+}
+
+fn expire_text(mailbox: &Mailbox, writer: &SharedWriter) {
+    let expired = mailbox.text_receiver.lock().unwrap().incoming.expire();
+    if let Some(id) = expired {
+        let _ = writer.write(wire::result(id, 2));
+        text_status(
+            id,
+            TransferDirection::Receive,
+            TransferState::Failed,
+            "文字接收超时，请重新复制",
+        );
+    }
+}
+
+fn send_text<C: ClipboardApi>(
+    text: &str,
+    revision: u64,
+    clipboard: &C,
+    writer: &SharedWriter,
+    mailbox: &Mailbox,
+) -> io::Result<()> {
+    let transfer = match text_transfer::Transfer::from_text(text) {
+        Ok(transfer) => transfer,
+        Err(error) => {
+            let mut id = [0; 16];
+            getrandom::getrandom(&mut id)
+                .map_err(|_| io::Error::other("text transfer ID unavailable"))?;
+            text_status(
+                id,
+                TransferDirection::Send,
+                TransferState::Preparing,
+                "正在检查文字",
+            );
+            text_status(
+                id,
+                TransferDirection::Send,
+                TransferState::Skipped,
+                &error.to_string(),
+            );
+            return Ok(());
+        }
+    };
+    let id = transfer.id;
+    {
+        let mut ids = mailbox.sent_text.lock().unwrap();
+        ids.push_back(id);
+        if ids.len() > 64 {
+            ids.pop_front();
+        }
+    }
+    text_status(
+        id,
+        TransferDirection::Send,
+        TransferState::Preparing,
+        "正在准备文字",
+    );
+    text_status(
+        id,
+        TransferDirection::Send,
+        TransferState::Transferring,
+        "正在同步文字",
+    );
+    let result = transfer.visit_frames(|frame| {
+        if mailbox.stop.load(Ordering::Acquire) || clipboard.change_id()? != revision {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "text copy superseded or session stopped",
+            ));
+        }
+        writer.write(frame)
+    });
+    match &result {
+        Ok(()) => text_status(
+            id,
+            TransferDirection::Send,
+            TransferState::Waiting,
+            "等待对方发布文字",
+        ),
+        Err(error) => {
+            let _ = writer.write(text_transfer::cancel(id));
+            text_status(
+                id,
+                TransferDirection::Send,
+                if error.kind() == io::ErrorKind::Interrupted {
+                    TransferState::Skipped
+                } else {
+                    TransferState::Failed
+                },
+                &error.to_string(),
+            );
+        }
+    }
+    result
+}
+
+fn apply_text_delivery<C: ClipboardApi>(
+    clipboard: &mut C,
+    delivery: TextDelivery,
+    last_remote: Option<u64>,
+) -> io::Result<Option<u64>> {
+    let text = text_transfer::normalize(&delivery.transfer.text)?;
+    let payload = ClipboardPayload::Text(text.clone());
+    for attempt in 0..3 {
+        let current = clipboard.change_id()?;
+        if !may_publish_remote(delivery.revision, current, last_remote) {
+            return Ok(None);
+        }
+        match clipboard.publish_revision_if_current(&payload, current) {
+            Ok(Some(published)) => {
+                if clipboard.change_id()? != published {
+                    return Ok(None);
+                }
+                return match clipboard.read()? {
+                    Some(ClipboardPayload::Text(readback))
+                        if text_transfer::normalize(&readback).ok().as_deref()
+                            == Some(text.as_str())
+                            && clipboard.change_id()? == published =>
+                    {
+                        Ok(Some(published))
+                    }
+                    _ => Ok(None),
+                };
+            }
+            Ok(None) => return Ok(None),
+            Err(error) if attempt == 2 => return Err(error),
+            Err(_) => thread::sleep(Duration::from_millis(50)),
+        }
+    }
+    unreachable!()
 }
 
 fn worker_loop<C: ClipboardApi>(
@@ -313,10 +593,12 @@ fn worker_loop<C: ClipboardApi>(
             let started = match &delivery {
                 RemoteDelivery::Image(d) => d.revision,
                 RemoteDelivery::Files(b) => b.revision,
+                RemoteDelivery::Text(d) => d.revision,
             };
             let can_publish = clipboard
                 .change_id()
                 .map(|current| publication_guard.permits(started, current, last_remote_revision));
+            let is_text = matches!(&delivery, RemoteDelivery::Text(_));
             let result = match can_publish {
                 Err(e) => Err(e),
                 Ok(false) => Ok(None),
@@ -331,6 +613,9 @@ fn worker_loop<C: ClipboardApi>(
                     RemoteDelivery::Files(mut batch) => {
                         apply_file_delivery(&mut clipboard, &mut batch, last_remote_revision)
                     }
+                    RemoteDelivery::Text(delivery) => {
+                        apply_text_delivery(&mut clipboard, delivery, last_remote_revision)
+                    }
                 },
             };
             let status = match &result {
@@ -338,7 +623,12 @@ fn worker_loop<C: ClipboardApi>(
                 Ok(None) => 1,
                 Err(_) => 2,
             };
-            report_transfer(
+            let report = if is_text {
+                crate::service_event::text_transfer
+            } else {
+                report_transfer
+            };
+            report(
                 id,
                 TransferDirection::Receive,
                 match status {
@@ -349,6 +639,7 @@ fn worker_loop<C: ClipboardApi>(
                 Some(match &result {
                     Err(e) => e.to_string(),
                     Ok(None) => "已有更新的本地复制内容；请在发送端重新复制".into(),
+                    _ if is_text => "文字已同步，可以粘贴".into(),
                     _ => "可在 Finder 或资源管理器中粘贴".into(),
                 }),
             );
@@ -372,8 +663,22 @@ fn worker_loop<C: ClipboardApi>(
                             continue;
                         }
                         revision = current;
-                        if matches!(payload, ClipboardPayload::Text(_)) {
+                        if let ClipboardPayload::Text(text) = &payload {
                             state = SyncState::default();
+                            if mailbox.texts_enabled.load(Ordering::Acquire) {
+                                if let Err(error) =
+                                    send_text(text, current, &clipboard, &writer, &mailbox)
+                                {
+                                    if matches!(
+                                        error.kind(),
+                                        io::ErrorKind::BrokenPipe
+                                            | io::ErrorKind::ConnectionReset
+                                            | io::ErrorKind::TimedOut
+                                    ) {
+                                        break;
+                                    }
+                                }
+                            }
                             continue;
                         }
                         if let (Some(sender), ClipboardPayload::Files(files)) =
@@ -440,13 +745,38 @@ fn worker_loop<C: ClipboardApi>(
                         state = SyncState::default();
                     }
                     Err(error) => {
-                        eprintln!("image clipboard read failed (will retry): {error}");
+                        if error.kind() == io::ErrorKind::InvalidData {
+                            // A rejected copy is terminal for this native revision; a new
+                            // explicit copy is required to retry, even with identical text.
+                            revision = current;
+                            if mailbox.texts_enabled.load(Ordering::Acquire) {
+                                let mut id = [0; 16];
+                                if getrandom::getrandom(&mut id).is_ok() {
+                                    text_status(
+                                        id,
+                                        TransferDirection::Send,
+                                        TransferState::Preparing,
+                                        "正在检查复制内容",
+                                    );
+                                    text_status(
+                                        id,
+                                        TransferDirection::Send,
+                                        TransferState::Skipped,
+                                        &error.to_string(),
+                                    );
+                                }
+                            }
+                            eprintln!("clipboard copy skipped: {error}");
+                        } else {
+                            eprintln!("clipboard read failed (will retry): {error}");
+                        }
                     }
                 }
             }
             Ok(_) => {}
             Err(error) => eprintln!("image clipboard revision read failed: {error}"),
         }
+        expire_text(&mailbox, &writer);
         let guard = mailbox.pending.lock().unwrap();
         if guard.is_none() && !mailbox.stop.load(Ordering::Acquire) {
             let _ = mailbox
@@ -970,3 +1300,9 @@ mod review_regressions {
 
 #[cfg(test)]
 mod file_tests;
+
+#[cfg(test)]
+mod text_tests;
+
+#[cfg(test)]
+mod text_loopback_tests;

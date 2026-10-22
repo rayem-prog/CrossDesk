@@ -27,6 +27,7 @@ mod server;
 mod service_event;
 mod shutdown;
 mod socket;
+mod text_transfer;
 mod transport;
 #[cfg(any(feature = "pairing", feature = "discovery"))]
 mod trust_store;
@@ -70,6 +71,11 @@ fn main() -> ExitCode {
     if let Some(value) = value_after(&args, "--image-clipboard") {
         unsafe {
             env::set_var("CROSSDESK_IMAGE_CLIPBOARD", value);
+        }
+    }
+    if let Some(value) = value_after(&args, "--text-clipboard") {
+        unsafe {
+            env::set_var("CROSSDESK_TEXT_CLIPBOARD", value);
         }
     }
     if let Some(value) = value_after(&args, "--file-clipboard") {
@@ -124,12 +130,14 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
             "--key-file",
             "--image-clipboard",
             "--file-clipboard",
+            "--text-clipboard",
         ],
         "client" => &[
             "--server",
             "--key-file",
             "--image-clipboard",
             "--file-clipboard",
+            "--text-clipboard",
         ],
         "gui" => &[],
         _ => return Err(format!("unknown command: {verb}")),
@@ -151,6 +159,9 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
     }
     if value_after(args, "--image-clipboard").is_some_and(|v| v != "on" && v != "off") {
         return Err("--image-clipboard must be on or off".into());
+    }
+    if value_after(args, "--text-clipboard").is_some_and(|v| v != "on" && v != "off") {
+        return Err("--text-clipboard must be on or off".into());
     }
     if value_after(args, "--file-clipboard").is_some_and(|v| v != "on" && v != "off") {
         return Err("--file-clipboard must be on or off".into());
@@ -183,13 +194,13 @@ fn print_usage() {
     println!(
         "CrossDesk {} - Windows keyboard/mouse -> Apple Silicon Mac
   crossdesk keygen [--out PATH]
-  crossdesk server [--bind 0.0.0.0:24920] [--edge both|left|right] [--key-file PATH] [--image-clipboard on|off] [--file-clipboard on|off]
-  crossdesk client --server WINDOWS_IP:24920 [--key-file PATH] [--image-clipboard on|off] [--file-clipboard on|off]
+  crossdesk server [--bind 0.0.0.0:24920] [--edge both|left|right] [--key-file PATH] [--image-clipboard on|off] [--file-clipboard on|off] [--text-clipboard on|off]
+  crossdesk client --server WINDOWS_IP:24920 [--key-file PATH] [--image-clipboard on|off] [--file-clipboard on|off] [--text-clipboard on|off]
 
 Use the same crossdesk.key on both machines. Both horizontal edges are enabled by default.
 Emergency release on Windows: Ctrl+Alt+Esc or Scroll Lock.
-Image and ordinary file clipboard sync are on by default. Copy screenshots, PDFs, documents or ZIP files after connecting.
-Both computers must run CrossDesk 0.5.0 / protocol v7. Files/folders: 512 MiB per file, 2 GiB/batch, 64 roots, 10,000 entries, 32 levels. Text and resume are outside this mode.",
+Plain text, image and ordinary file clipboard sync are on by default. Copy screenshots, PDFs, documents or ZIP files after connecting.
+Both computers must support protocol v7. Text sync requires CrossDesk 0.6.0 or later with text sync enabled on both computers. Files/folders: 512 MiB per file, 2 GiB/batch, 64 roots, 10,000 entries, 32 levels. Plain text: normalized UTF-8, 1 MiB maximum. Resume is outside this mode.",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -256,5 +267,22 @@ mod easy_entry_tests {
             choose_command(&["server".into()]).unwrap(),
             Command::Server { .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod text_option_tests {
+    use super::*;
+    #[test]
+    fn text_option_is_independent_and_rejects_invalid_missing_and_duplicate_values() {
+        let parse =
+            |s: &str| parse_args(&s.split_whitespace().map(str::to_string).collect::<Vec<_>>());
+        assert!(
+            parse("server --text-clipboard off --file-clipboard on --image-clipboard off").is_ok()
+        );
+        assert!(parse("client --server 127.0.0.1:24920 --text-clipboard on").is_ok());
+        assert!(parse("server --text-clipboard yes").is_err());
+        assert!(parse("server --text-clipboard").is_err());
+        assert!(parse("server --text-clipboard on --text-clipboard off").is_err());
     }
 }

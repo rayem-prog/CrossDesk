@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::net::{Shutdown, TcpListener};
 use std::sync::mpsc;
 #[derive(Clone)]
-struct Memory(Arc<Mutex<(u64, ClipboardPayload, usize)>>);
+pub(super) struct Memory(pub(super) Arc<Mutex<(u64, ClipboardPayload, usize)>>);
 impl ClipboardApi for Memory {
     fn change_id(&self) -> io::Result<u64> {
         Ok(self.0.lock().unwrap().0)
@@ -55,7 +55,7 @@ fn empty_batch(root: PathBuf, id: [u8; 16]) -> CompletedBatch {
         .unwrap()
         .unwrap()
 }
-fn streams() -> (SecureStream, SecureStream) {
+pub(super) fn streams() -> (SecureStream, SecureStream) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let server = thread::spawn(move || {

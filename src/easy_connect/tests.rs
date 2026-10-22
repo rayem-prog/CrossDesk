@@ -2,7 +2,14 @@ use super::*;
 use std::sync::{Arc, Mutex};
 struct MemoryService(Arc<Mutex<ServiceState>>);
 impl ServiceControl for MemoryService {
-    fn start(&mut self, _: &AppConfig, _: &std::path::Path, _: bool, _: bool) -> io::Result<()> {
+    fn start(
+        &mut self,
+        _: &AppConfig,
+        _: &std::path::Path,
+        _: bool,
+        _: bool,
+        _: bool,
+    ) -> io::Result<()> {
         *self.0.lock().unwrap() = ServiceState::Starting;
         Ok(())
     }
@@ -67,10 +74,12 @@ fn disabled_auto_connect_and_sync_choices_survive_restart() {
     let mut pref = Preferences::default();
     pref.auto_connect = false;
     pref.image_clipboard = false;
+    pref.text_clipboard = false;
     pref.save(&store).unwrap();
     let restored = Preferences::load(&store).unwrap();
     assert!(!restored.auto_connect);
     assert!(!restored.image_clipboard);
+    assert!(!restored.text_clipboard);
     assert!(restored.file_clipboard);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -175,7 +184,14 @@ struct AddressService {
     state: ServiceState,
 }
 impl ServiceControl for AddressService {
-    fn start(&mut self, c: &AppConfig, _: &std::path::Path, _: bool, _: bool) -> io::Result<()> {
+    fn start(
+        &mut self,
+        c: &AppConfig,
+        _: &std::path::Path,
+        _: bool,
+        _: bool,
+        _: bool,
+    ) -> io::Result<()> {
         self.state = if c.server == "192.168.1.114:24920" {
             ServiceState::Connected
         } else {
@@ -448,5 +464,67 @@ fn incompatible_history_keeps_the_trusted_peer_without_accumulating_broadcast_id
     assert!(core.incompatible.contains(&[3; 16]));
     assert!(core.incompatible.len() <= 2);
     core.shutdown();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn older_preferences_enable_text_and_explicit_text_choice_survives_restart() {
+    let older: Preferences = serde_json::from_str(
+        r#"{"autoConnect":false,"imageClipboard":false,"fileClipboard":true}"#,
+    )
+    .unwrap();
+    assert_eq!(serde_json::to_value(&older).unwrap()["textClipboard"], true);
+    let explicit: Preferences = serde_json::from_str(
+        r#"{"textClipboard":false,"imageClipboard":true,"fileClipboard":false}"#,
+    )
+    .unwrap();
+    let roundtrip: Preferences =
+        serde_json::from_value(serde_json::to_value(&explicit).unwrap()).unwrap();
+    assert_eq!(
+        serde_json::to_value(roundtrip).unwrap()["textClipboard"],
+        false
+    );
+}
+
+#[test]
+fn text_option_requires_disconnect_and_persists_independently() {
+    let mut nonce = [0; 8];
+    getrandom::getrandom(&mut nonce).unwrap();
+    let root = std::env::temp_dir().join(format!("crossdesk-text-options-{nonce:x?}"));
+    let store = Arc::new(TrustedStore::new(root.clone()).unwrap());
+    let state = Arc::new(Mutex::new(ServiceState::Stopped));
+    let mut core =
+        Core::from_parts("macos", store.clone(), Box::new(MemoryService(state))).unwrap();
+    for phase in [
+        ServiceState::Starting,
+        ServiceState::Connecting,
+        ServiceState::Connected,
+        ServiceState::Listening,
+        ServiceState::Retrying,
+    ] {
+        core.phase = phase;
+        assert!(
+            core.command(Command::Options {
+                auto: true,
+                image: true,
+                files: true,
+                text: false
+            })
+            .is_err()
+        );
+        assert!(core.view().text_clipboard);
+    }
+    core.disconnect().unwrap();
+    core.command(Command::Options {
+        auto: true,
+        image: true,
+        files: false,
+        text: false,
+    })
+    .unwrap();
+    let restored = Preferences::load(&store).unwrap();
+    assert!(!restored.text_clipboard);
+    assert!(restored.image_clipboard);
+    assert!(!restored.file_clipboard);
     std::fs::remove_dir_all(root).unwrap();
 }
