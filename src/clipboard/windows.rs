@@ -274,9 +274,8 @@ fn read_text() -> std::io::Result<Option<String>> {
 }
 
 fn decode_text(bytes: &[u8]) -> std::io::Result<String> {
-    if bytes.len() % 2 != 0 {
-        return Err(invalid_data("odd-sized UTF-16 clipboard text"));
-    }
+    // Only complete words preceding the terminator belong to CF_UNICODETEXT;
+    // GlobalSize may include an odd number of padding bytes after it.
     let mut words = Vec::with_capacity(bytes.len() / 2);
     let mut terminated = false;
     for chunk in bytes.chunks_exact(2) {
