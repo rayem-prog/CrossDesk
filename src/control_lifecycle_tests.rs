@@ -187,10 +187,35 @@ fn negotiated_text_availability_is_cleared_on_retry_stop_and_restart() {
     b.child_stdin
         .as_mut()
         .unwrap()
+        .write_all(b"transfer-failed\n")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while b.transfer_status().is_none() {
+        b.collect_logs();
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    b.child_stdin
+        .as_mut()
+        .unwrap()
         .write_all(b"retry\n")
         .unwrap();
     wait_state(&mut b, ServiceState::Retrying);
     assert!(b.clipboard_capabilities().is_none());
+    assert!(
+        b.transfer_status().is_none(),
+        "a disconnected session retained a transfer status"
+    );
+    b.child_stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"connect\n")
+        .unwrap();
+    wait_state(&mut b, ServiceState::Connected);
+    assert!(
+        b.transfer_status().is_none(),
+        "reconnection revived an old transfer"
+    );
     b.stop().unwrap();
     assert!(b.clipboard_capabilities().is_none());
 }

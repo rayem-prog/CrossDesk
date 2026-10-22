@@ -325,6 +325,9 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
                         if let Some(capabilities) = &capabilities {
                             capabilities.lock().unwrap().take();
                         }
+                        if let Some(transfers) = &transfers {
+                            *transfers.lock().unwrap() = Default::default();
+                        }
                     }
                     *slot.lock().unwrap() = Some(event);
                     continue;
@@ -361,7 +364,7 @@ impl ProcessBackend {
         }
     }
     pub fn transfer_status(&self) -> Option<crate::service_event::TransferEvent> {
-        if self.child.is_some() {
+        if self.child.is_some() && self.status.state == ServiceState::Connected {
             self.transfers.lock().unwrap().latest.clone()
         } else {
             None
