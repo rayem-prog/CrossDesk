@@ -211,51 +211,57 @@ fn read_files() -> std::io::Result<Option<Vec<PathBuf>>> {
     read_files_applescript()
 }
 
+fn decode_file_paths(bytes: &[u8]) -> std::io::Result<Vec<PathBuf>> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let records = bytes
+        .strip_suffix(&[0])
+        .ok_or_else(|| std::io::Error::other("unterminated native file paths"))?;
+    let text = std::str::from_utf8(records)
+        .map_err(|_| std::io::Error::other("native file paths are not UTF-8"))?;
+    text.split('\0')
+        .map(|path| {
+            let path = PathBuf::from(path);
+            if !path.is_absolute() {
+                return Err(std::io::Error::other("invalid native file path"));
+            }
+            Ok(path)
+        })
+        .collect()
+}
 fn read_files_jxa() -> std::io::Result<Option<Vec<PathBuf>>> {
-    let script = READ_FILES_SCRIPT;
     let output = Command::new("osascript")
-        .args(["-l", "JavaScript", "-e", script])
+        .args(["-l", "JavaScript", "-e", READ_FILES_SCRIPT])
         .output()?;
     if !output.status.success() || output.stdout.is_empty() {
         return Ok(None);
     }
-    let files = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(PathBuf::from)
-        .collect::<Vec<_>>();
-    if files.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(files))
-    }
+    let files = decode_file_paths(&output.stdout)?;
+    Ok((!files.is_empty()).then_some(files))
 }
 
 fn read_files_applescript() -> std::io::Result<Option<Vec<PathBuf>>> {
     let script = r#"try
   set clipboardFiles to the clipboard as «class furl»
-  if class of clipboardFiles is list then
-    repeat with clipboardFile in clipboardFiles
-      POSIX path of clipboardFile
-    end repeat
-  else
-    POSIX path of clipboardFiles
-  end if
+  if class of clipboardFiles is not list then set clipboardFiles to {clipboardFiles}
+  set outputText to ""
+  repeat with clipboardFile in clipboardFiles
+    set outputText to outputText & (POSIX path of clipboardFile) & (ASCII character 0)
+  end repeat
+  return outputText
 on error
+  return ""
 end try
 "#;
     let output = Command::new("osascript").args(["-e", script]).output()?;
     if !output.status.success() || output.stdout.is_empty() {
         return Ok(None);
     }
-    let files = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(PathBuf::from)
-        .collect::<Vec<_>>();
-    if files.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(files))
-    }
+    // osascript appends one output newline, separate from NUL-delimited paths.
+    let bytes = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+    let files = decode_file_paths(bytes)?;
+    Ok((!files.is_empty()).then_some(files))
 }
 
 fn has_file_markers() -> std::io::Result<bool> {
@@ -408,13 +414,15 @@ const READ_FILES_SCRIPT: &str = r#"ObjC.import("AppKit");
 ObjC.import("Foundation");
 const pasteboard = $.NSPasteboard.generalPasteboard;
 const seen = {};
+const separator = $.NSData.alloc.initWithBase64EncodedStringOptions("AA==", 0);
 function emitPath(path) {
   if (!path || path.isNil && path.isNil()) return;
   const value = ObjC.unwrap(path);
   if (value && !seen[value]) {
     seen[value] = true;
-    const data = $.NSString.alloc.initWithUTF8String(value + "\n").dataUsingEncoding($.NSUTF8StringEncoding);
+    const data = $.NSString.alloc.initWithUTF8String(value).dataUsingEncoding($.NSUTF8StringEncoding);
     $.NSFileHandle.fileHandleWithStandardOutput.writeData(data);
+    $.NSFileHandle.fileHandleWithStandardOutput.writeData(separator);
   }
 }
 function emitUrl(url) {
@@ -539,11 +547,7 @@ mod tests {
         let input = file_input(&[a.clone(), b.clone()]).unwrap();
         isolated(WRITE_FILES_SCRIPT, &name, &input);
         let output = isolated(READ_FILES_SCRIPT, &name, &[]);
-        let paths: Vec<_> = String::from_utf8(output)
-            .unwrap()
-            .lines()
-            .map(PathBuf::from)
-            .collect();
+        let paths = decode_file_paths(&output).unwrap();
         assert_eq!(paths, vec![a, b]);
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -560,10 +564,7 @@ mod tests {
             &file_input(&[path.clone()]).unwrap(),
         );
         let output = isolated(READ_FILES_SCRIPT, &name, &[]);
-        assert_eq!(
-            String::from_utf8(output).unwrap().trim(),
-            path.to_str().unwrap()
-        );
+        assert_eq!(decode_file_paths(&output).unwrap(), vec![path.clone()]);
         let png = isolated(READ_BITMAP_SCRIPT, &name, &[]);
         assert_eq!(
             image::load_from_memory(&png)
@@ -602,6 +603,31 @@ mod tests {
 #[cfg(test)]
 mod ordinary_file_tests {
     use super::*;
+    #[test]
+    fn named_pasteboard_keeps_a_control_character_path_intact_for_batch_rejection() {
+        let name = format!("org.crossdesk.control-path.{}", std::process::id());
+        let root =
+            std::env::temp_dir().join(format!("crossdesk-control-path-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("invalid\nname");
+        std::fs::write(&path, b"must not become two other paths").unwrap();
+        let script = r#"ObjC.import('AppKit'); ObjC.import('Foundation');
+const path = $.NSString.alloc.initWithDataEncoding($.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile,$.NSUTF8StringEncoding);
+const pasteboard = $.NSPasteboard.generalPasteboard;
+pasteboard.clearContents;
+pasteboard.writeObjects($.NSArray.arrayWithObject($.NSURL.fileURLWithPath(path)));
+"#;
+        isolated(script, &name, path.to_str().unwrap().as_bytes());
+        let bytes = isolated(READ_FILES_SCRIPT, &name, &[]);
+        let received = decode_file_paths(&bytes).unwrap();
+        assert!(crate::file_transfer::tree::SourceTree::scan(&received, &mut || false).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(
+            received,
+            vec![path],
+            "clipboard transport split one invalid name into different source paths"
+        );
+    }
     fn isolated(script: &str, name: &str, input: &[u8]) -> Vec<u8> {
         let script = script.replace(
             "$.NSPasteboard.generalPasteboard",
@@ -625,11 +651,7 @@ mod ordinary_file_tests {
         }
         isolated(WRITE_FILES_SCRIPT, &name, &file_input(&files).unwrap());
         let got = isolated(READ_FILES_SCRIPT, &name, &[]);
-        let got: Vec<_> = String::from_utf8(got)
-            .unwrap()
-            .lines()
-            .map(PathBuf::from)
-            .collect();
+        let got = decode_file_paths(&got).unwrap();
         assert_eq!(got.len(), 3);
         assert_eq!(std::fs::read(&got[0]).unwrap(), b"%PDF\0");
         assert_eq!(std::fs::read(&got[1]).unwrap(), b"PK\x03\x04");
@@ -658,8 +680,7 @@ mod ordinary_file_tests {
             vec![folder.clone(), document.clone(), empty.clone()],
         ] {
             isolated(WRITE_FILES_SCRIPT, &name, &file_input(&paths).unwrap());
-            let read = String::from_utf8(isolated(READ_FILES_SCRIPT, &name, &[])).unwrap();
-            let received: Vec<_> = read.lines().map(PathBuf::from).collect();
+            let received = decode_file_paths(&isolated(READ_FILES_SCRIPT, &name, &[])).unwrap();
             assert_eq!(received.len(), paths.len());
             // NSURL may return decomposed Unicode on macOS. The selected
             // filesystem objects must survive even when path spelling changes.
