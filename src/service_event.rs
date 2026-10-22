@@ -75,10 +75,20 @@ pub enum TransferDirection {
     Send,
     Receive,
 }
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "gui", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "gui", serde(rename_all = "snake_case"))]
+pub enum TransferKind {
+    #[default]
+    Files,
+    Text,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "gui", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "gui", serde(deny_unknown_fields))]
 pub struct TransferEvent {
+    #[cfg_attr(feature = "gui", serde(default))]
+    pub kind: TransferKind,
     pub id: String,
     pub direction: TransferDirection,
     pub state: TransferState,
@@ -122,11 +132,29 @@ pub fn transfer(
     state: TransferState,
     message: Option<String>,
 ) {
+    emit_transfer(TransferKind::Files, id, direction, state, message);
+}
+pub fn text_transfer(
+    id: [u8; 16],
+    direction: TransferDirection,
+    state: TransferState,
+    message: Option<String>,
+) {
+    emit_transfer(TransferKind::Text, id, direction, state, message);
+}
+fn emit_transfer(
+    kind: TransferKind,
+    id: [u8; 16],
+    direction: TransferDirection,
+    state: TransferState,
+    message: Option<String>,
+) {
     #[cfg(feature = "gui")]
     {
         use std::io::Write;
         if std::env::var_os("DESKBRIDGE_GUI_CHILD").is_some() {
             let event = TransferEvent {
+                kind,
                 id: id.iter().map(|v| format!("{v:02x}")).collect(),
                 direction,
                 state,
@@ -139,7 +167,7 @@ pub fn transfer(
     }
     #[cfg(not(feature = "gui"))]
     {
-        let _ = (id, direction, state, message);
+        let _ = (kind, id, direction, state, message);
     }
 }
 #[derive(Default)]
@@ -191,6 +219,7 @@ mod tests {
     #[test]
     fn transfer_failures_do_not_parse_as_connection_events_or_replace_a_new_copy() {
         let event = TransferEvent {
+            kind: TransferKind::Files,
             id: "11".repeat(16),
             direction: TransferDirection::Send,
             state: TransferState::Preparing,
@@ -218,6 +247,7 @@ mod tests {
     #[test]
     fn a_fast_publication_result_cannot_regress_to_waiting() {
         let event = TransferEvent {
+            kind: TransferKind::Files,
             id: "33".repeat(16),
             direction: TransferDirection::Send,
             state: TransferState::Preparing,
@@ -234,5 +264,88 @@ mod tests {
             ..event
         });
         assert_eq!(tracker.latest.unwrap().state, TransferState::Ready);
+    }
+}
+
+#[cfg(all(test, feature = "gui"))]
+mod clipboard_capability_tests {
+    use super::*;
+    #[test]
+    fn capability_ipc_is_strict_bounded_and_not_a_human_log() {
+        assert_eq!(
+            parse_capabilities("crossdesk-capabilities\t{\"text\":true}"),
+            Some(ClipboardCapabilities { text: true })
+        );
+        assert_eq!(
+            parse_capabilities("crossdesk-capabilities\t{\"text\":false}"),
+            Some(ClipboardCapabilities { text: false })
+        );
+        for bad in [
+            "text enabled",
+            "crossdesk-capabilities\t{}",
+            "crossdesk-capabilities\t{\"text\":1}",
+            "crossdesk-capabilities\t{\"text\":true,\"other\":false}",
+        ] {
+            assert!(parse_capabilities(bad).is_none());
+        }
+        assert!(
+            parse_capabilities(&format!(
+                "crossdesk-capabilities\t{}{{\"text\":true}}",
+                " ".repeat(4096)
+            ))
+            .is_none()
+        );
+    }
+    #[test]
+    fn old_file_events_default_to_files_and_text_events_keep_kind() {
+        let old = "crossdesk-transfer\t{\"id\":\"11111111111111111111111111111111\",\"direction\":\"send\",\"state\":\"preparing\",\"message\":null}";
+        let mut event = parse_transfer(old).unwrap();
+        assert_eq!(event.kind, TransferKind::Files);
+        event.kind = TransferKind::Text;
+        assert_eq!(
+            parse_transfer(&encode_transfer(&event)).unwrap().kind,
+            TransferKind::Text
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "gui", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "gui", serde(deny_unknown_fields))]
+pub struct ClipboardCapabilities {
+    pub text: bool,
+}
+pub fn parse_capabilities(line: &str) -> Option<ClipboardCapabilities> {
+    #[cfg(feature = "gui")]
+    {
+        if line.len() > 4096 {
+            return None;
+        }
+        serde_json::from_str(line.strip_prefix("crossdesk-capabilities\t")?).ok()
+    }
+    #[cfg(not(feature = "gui"))]
+    {
+        let _ = line;
+        None
+    }
+}
+pub fn capabilities(text: bool) {
+    #[cfg(feature = "gui")]
+    {
+        use std::io::Write;
+        if std::env::var_os("DESKBRIDGE_GUI_CHILD").is_some() {
+            let event = ClipboardCapabilities { text };
+            let mut out = std::io::stdout().lock();
+            let _ = writeln!(
+                out,
+                "crossdesk-capabilities\t{}",
+                serde_json::to_string(&event).unwrap()
+            );
+            let _ = out.flush();
+        }
+    }
+    #[cfg(not(feature = "gui"))]
+    {
+        let _ = text;
     }
 }

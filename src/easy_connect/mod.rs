@@ -45,6 +45,8 @@ pub struct ConnectView {
     pub pairing_code: Option<String>,
     pub seconds_left: u16,
     pub auto_connect: bool,
+    pub text_clipboard: bool,
+    pub text_clipboard_active: Option<bool>,
     pub image_clipboard: bool,
     pub file_clipboard: bool,
     pub error: Option<String>,
@@ -63,6 +65,8 @@ impl ConnectView {
             pairing_code: None,
             seconds_left: 0,
             auto_connect: true,
+            text_clipboard: true,
+            text_clipboard_active: None,
             image_clipboard: true,
             file_clipboard: true,
             error: None,
@@ -74,21 +78,33 @@ impl ConnectView {
     }
 }
 pub trait ServiceControl: Send {
-    fn start(&mut self, config: &AppConfig, key: &Path, image: bool, files: bool)
-    -> io::Result<()>;
+    fn start(
+        &mut self,
+        config: &AppConfig,
+        key: &Path,
+        image: bool,
+        files: bool,
+        text: bool,
+    ) -> io::Result<()>;
     fn stop(&mut self) -> io::Result<()>;
     fn poll(&mut self) -> (ServiceState, Option<String>);
     fn logs(&self) -> Vec<String>;
     fn transfer(&self) -> Option<crate::service_event::TransferEvent> {
         None
     }
+    fn capabilities(&self) -> Option<crate::service_event::ClipboardCapabilities> {
+        None
+    }
 }
 impl ServiceControl for ProcessBackend {
+    fn capabilities(&self) -> Option<crate::service_event::ClipboardCapabilities> {
+        self.clipboard_capabilities()
+    }
     fn transfer(&self) -> Option<crate::service_event::TransferEvent> {
         self.transfer_status()
     }
-    fn start(&mut self, c: &AppConfig, k: &Path, i: bool, f: bool) -> io::Result<()> {
-        self.start_link(c, k, i, f)
+    fn start(&mut self, c: &AppConfig, k: &Path, i: bool, f: bool, t: bool) -> io::Result<()> {
+        self.start_link(c, k, i, f, t)
     }
     fn stop(&mut self) -> io::Result<()> {
         ControlBackend::stop(self)
@@ -113,6 +129,7 @@ pub enum Command {
         auto: bool,
         image: bool,
         files: bool,
+        text: bool,
     },
     Manual {
         address: SocketAddr,
@@ -385,6 +402,7 @@ impl Core {
                         &peer.key_path,
                         self.prefs.image_clipboard,
                         self.prefs.file_clipboard,
+                        self.prefs.text_clipboard,
                     )?;
                     self.current_address = Some(address);
                     self.phase = ServiceState::Starting;
@@ -437,6 +455,12 @@ impl Core {
         view.devices = devices;
         view.selected_id = self.selected.map(|id| hex(&id));
         view.auto_connect = self.prefs.auto_connect;
+        view.text_clipboard = self.prefs.text_clipboard;
+        view.text_clipboard_active = if self.phase == ServiceState::Connected {
+            self.backend.capabilities().map(|c| c.text)
+        } else {
+            None
+        };
         view.image_clipboard = self.prefs.image_clipboard;
         view.file_clipboard = self.prefs.file_clipboard;
         view.error = self.error.clone().or_else(|| self.discovery_error.clone());
@@ -584,18 +608,25 @@ impl Core {
                     self.start_pairing()?;
                 }
             }
-            Command::Options { auto, image, files } => {
+            Command::Options {
+                auto,
+                image,
+                files,
+                text,
+            } => {
                 if matches!(
                     self.phase,
                     ServiceState::Connected
                         | ServiceState::Connecting
                         | ServiceState::Starting
                         | ServiceState::Listening
+                        | ServiceState::Retrying
                 ) {
                     return Err(io::Error::other("请先断开，再修改同步设置"));
                 }
                 let mut p = self.prefs.clone();
                 p.auto_connect = auto;
+                p.text_clipboard = text;
                 p.image_clipboard = image;
                 p.file_clipboard = files;
                 p.save(&self.store)?;

@@ -65,13 +65,10 @@ impl ClipboardApi for Clipboard {
                 (WRITE_BITMAP_SCRIPT, crate::image_transfer::png_bytes(data)?)
             }
             ClipboardPayload::Files(files) => (WRITE_FILES_SCRIPT, file_input(files)?),
-            _ => {
-                if self.change_id()? != expected {
-                    return Ok(None);
-                }
-                self.write(payload)?;
-                return self.change_id().map(Some);
-            }
+            ClipboardPayload::Text(text) => (
+                WRITE_TEXT_SCRIPT,
+                crate::text_transfer::normalize(text)?.into_bytes(),
+            ),
         };
         let script = format!(
             "{}\n$.NSFileHandle.fileHandleWithStandardOutput.writeData($(String(crossdeskPublicationRevision)).dataUsingEncoding($.NSUTF8StringEncoding));",
@@ -139,49 +136,35 @@ unsafe fn objc_send_isize(receiver: ObjcId, selector: ObjcSel) -> isize {
 }
 
 fn read_text() -> std::io::Result<Option<String>> {
-    let script = r#"ObjC.import("AppKit");
-ObjC.import("Foundation");
-function exists(value) { return value !== undefined && value !== null && !(value.isNil && value.isNil()); }
-const pasteboard = $.NSPasteboard.generalPasteboard;
-for (const type of ["public.utf8-plain-text", "NSStringPboardType", "public.utf16-plain-text"]) {
-  const value = pasteboard.stringForType(type);
-  if (exists(value)) {
-    const text = ObjC.unwrap(value);
-    if (text.length > 0) {
-      const data = $.NSString.alloc.initWithUTF8String(text).dataUsingEncoding($.NSUTF8StringEncoding);
-      $.NSFileHandle.fileHandleWithStandardOutput.writeData(data);
-      break;
-    }
-  }
-}
-"#;
+    let script = READ_TEXT_SCRIPT;
     let output = Command::new("osascript")
         .args(["-l", "JavaScript", "-e", script])
         .output()?;
-    if !output.status.success() || output.stdout.is_empty() {
+    decode_text_output(output)
+}
+
+fn decode_text_output(output: std::process::Output) -> std::io::Result<Option<String>> {
+    let invalid =
+        || crate::text_transfer::invalid("text is empty, invalid, contains NUL, or exceeds 1 MiB");
+    // The subprocess diagnostic is untrusted and must never appear in events.
+    if !output.status.success() {
+        return Err(invalid());
+    }
+    if output.stdout.is_empty() {
         return Ok(None);
     }
-    let text = String::from_utf8(output.stdout)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    Ok(Some(text.replace("\r\n", "\n").replace('\r', "\n")))
+    let text = String::from_utf8(output.stdout).map_err(|_| invalid())?;
+    crate::text_transfer::normalize(&text)
+        .map(Some)
+        .map_err(|_| invalid())
 }
 
 fn write_text(text: &str) -> std::io::Result<()> {
-    let script = r#"ObjC.import("AppKit");
-ObjC.import("Foundation");
-const data = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
-const text = $.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding);
-if (!text || text.isNil()) throw new Error("invalid UTF-8 text");
-const pasteboard = $.NSPasteboard.generalPasteboard;
-pasteboard.clearContents;
-let wrote = pasteboard.setStringForType(text, "public.utf8-plain-text");
-wrote = pasteboard.setStringForType(text, "NSStringPboardType") || wrote;
-if (!wrote) throw new Error("set text failed");
-"#;
+    let script = WRITE_TEXT_SCRIPT;
     write_filter(
         "osascript",
         &["-l", "JavaScript", "-e", script],
-        text.as_bytes(),
+        crate::text_transfer::normalize(text)?.as_bytes(),
     )
     .map(|_| ())
 }
@@ -759,5 +742,174 @@ pasteboard.writeObjects($.NSArray.arrayWithObject($.NSURL.fileURLWithPath(path))
         let receipt = String::from_utf8(isolated(&script, &name, data.get_ref())).unwrap();
         assert_eq!(receipt, "0");
         assert_eq!(isolated(READ_BITMAP_SCRIPT, &name, &[]), *data.get_ref());
+    }
+}
+
+const READ_TEXT_SCRIPT: &str = r#"ObjC.import("AppKit");
+ObjC.import("Foundation");
+function exists(value) { return value !== undefined && value !== null && !(value.isNil && value.isNil()); }
+const pasteboard = $.NSPasteboard.generalPasteboard;
+for (const type of ["public.utf8-plain-text", "NSStringPboardType", "public.utf16-plain-text"]) {
+  // Bound native data and NSString before bridging any text into JavaScript.
+  const nativeData = pasteboard.dataForType(type);
+  if (exists(nativeData) && nativeData.length > 4194306) throw new Error("text exceeds native bound");
+  const value = pasteboard.stringForType(type);
+  if (!exists(value)) {
+    if (exists(nativeData)) throw new Error("invalid native text");
+    continue;
+  }
+  if (value.length > 2097152) throw new Error("text exceeds native bound");
+  const data = value.dataUsingEncodingAllowLossyConversion($.NSUTF8StringEncoding, false);
+  if (!exists(data) || data.length > 2097152) throw new Error("invalid or oversized UTF-8 text");
+  const text = ObjC.unwrap(value).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  if (text.length === 0 || text.indexOf("\0") !== -1) throw new Error("empty or NUL text");
+  const normalized = $(text).dataUsingEncoding($.NSUTF8StringEncoding);
+  if (normalized.length > 1048576) throw new Error("text exceeds 1 MiB");
+  $.NSFileHandle.fileHandleWithStandardOutput.writeData(normalized);
+  break;
+}
+"#;
+
+const WRITE_TEXT_SCRIPT: &str = r#"ObjC.import("AppKit");
+ObjC.import("Foundation");
+const data = $.NSFileHandle.fileHandleWithStandardInput.readDataOfLength(2097153);
+if (data.length > 2097152) throw new Error("text exceeds native bound");
+const decoded = $.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding);
+if (!decoded || decoded.isNil()) throw new Error("invalid UTF-8 text");
+const value = ObjC.unwrap(decoded).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+if (value.length === 0 || value.indexOf("\0") !== -1) throw new Error("empty or NUL text");
+const text = $(value);
+if (text.lengthOfBytesUsingEncoding($.NSUTF8StringEncoding) > 1048576) throw new Error("text exceeds 1 MiB");
+const token = $.NSUUID.UUID.UUIDString;
+const item = $.NSPasteboardItem.alloc.init;
+if (!item.setStringForType(text, "public.utf8-plain-text")) throw new Error("prepare text failed");
+item.setStringForType(text, "NSStringPboardType");
+if (!item.setStringForType(token, "org.crossdesk.clipboard-origin")) throw new Error("prepare origin failed");
+const pasteboard = $.NSPasteboard.generalPasteboard;
+pasteboard.clearContents;
+if (!pasteboard.writeObjects($.NSArray.arrayWithObject(item))) throw new Error("set text failed");
+// CrossDesk receipt boundary.
+const revision = Number(pasteboard.changeCount);
+const origin = pasteboard.stringForType("org.crossdesk.clipboard-origin");
+var crossdeskPublicationRevision = origin && !origin.isNil() && ObjC.unwrap(origin) === ObjC.unwrap(token) && Number(pasteboard.changeCount) === revision ? revision : 0;
+void 0;
+"#;
+
+#[cfg(test)]
+mod text_tests {
+    use super::*;
+    fn run(script: &str, name: &str, input: &[u8]) -> std::io::Result<Vec<u8>> {
+        let script = script.replace(
+            "$.NSPasteboard.generalPasteboard",
+            &format!("$.NSPasteboard.pasteboardWithName(\"{name}\")"),
+        );
+        write_filter("osascript", &["-l", "JavaScript", "-e", &script], input)
+    }
+    fn name(suffix: &str) -> String {
+        format!("org.crossdesk.text.{}.{suffix}", std::process::id())
+    }
+    fn read_named(name: &str) -> std::io::Result<Option<String>> {
+        let script = READ_TEXT_SCRIPT.replace(
+            "$.NSPasteboard.generalPasteboard",
+            &format!("$.NSPasteboard.pasteboardWithName(\"{name}\")"),
+        );
+        decode_text_output(
+            Command::new("osascript")
+                .args(["-l", "JavaScript", "-e", &script])
+                .output()
+                .unwrap(),
+        )
+    }
+    #[test]
+    fn named_invalid_native_text_reports_invalid_data_without_exposing_content() {
+        let name = name("read-invalid");
+        let raw = r#"ObjC.import("AppKit"); ObjC.import("Foundation");
+const data = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
+const pasteboard = $.NSPasteboard.generalPasteboard;
+pasteboard.clearContents;
+pasteboard.setDataForType(data, "public.utf8-plain-text");
+"#;
+        for bytes in [
+            b"private secret\0tail".to_vec(),
+            vec![b'x'; 1_048_577],
+            vec![0xff],
+            vec![],
+        ] {
+            run(raw, &name, &bytes).unwrap();
+            let error = read_named(&name).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert!(!error.to_string().contains("private secret"));
+            assert!(!error.to_string().contains("tail"));
+        }
+    }
+    #[test]
+    fn named_pasteboard_without_text_is_absent_instead_of_invalid() {
+        let name = name("no-format");
+        run(
+            "ObjC.import('AppKit'); $.NSPasteboard.generalPasteboard.clearContents;",
+            &name,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(read_named(&name).unwrap(), None);
+    }
+    #[test]
+    fn named_text_preserves_unicode_whitespace_and_normalizes_all_newlines() {
+        let name = name("roundtrip");
+        run(
+            WRITE_TEXT_SCRIPT,
+            &name,
+            " \t中文 café 😀\r\nline\rnext\n \t".as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            run(READ_TEXT_SCRIPT, &name, &[]).unwrap(),
+            " \t中文 café 😀\nline\nnext\n \t".as_bytes()
+        );
+    }
+    #[test]
+    fn named_text_rejects_invalid_payload_before_clearing_existing_copy() {
+        let name = name("invalid");
+        run(WRITE_TEXT_SCRIPT, &name, b"keep me").unwrap();
+        for invalid in [
+            vec![],
+            b"before\0after".to_vec(),
+            vec![0xff],
+            vec![b'x'; 1_048_577],
+        ] {
+            assert!(
+                run(WRITE_TEXT_SCRIPT, &name, &invalid).is_err(),
+                "invalid input was published"
+            );
+            assert_eq!(run(READ_TEXT_SCRIPT, &name, &[]).unwrap(), b"keep me");
+        }
+    }
+    #[test]
+    fn named_text_stale_guard_preserves_local_copy_and_receipt_tracks_origin() {
+        let name = name("receipt");
+        run(WRITE_TEXT_SCRIPT, &name, b"local copy").unwrap();
+        assert!(
+            run(
+                &guarded_write_script(WRITE_TEXT_SCRIPT, u64::MAX),
+                &name,
+                b"remote"
+            )
+            .is_err()
+        );
+        assert_eq!(run(READ_TEXT_SCRIPT, &name, &[]).unwrap(), b"local copy");
+        let emit = "\n$.NSFileHandle.fileHandleWithStandardOutput.writeData($(String(crossdeskPublicationRevision)).dataUsingEncoding($.NSUTF8StringEncoding));";
+        let script = format!("{WRITE_TEXT_SCRIPT}{emit}");
+        let receipt = String::from_utf8(run(&script, &name, b"remote").unwrap())
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert!(receipt > 0);
+        let script = WRITE_TEXT_SCRIPT.replace("// CrossDesk receipt boundary.",
+            "pasteboard.clearContents; pasteboard.setStringForType(text,'public.utf8-plain-text');\n// CrossDesk receipt boundary.");
+        assert_eq!(
+            run(&format!("{script}{emit}"), &name, b"remote").unwrap(),
+            b"0"
+        );
+        assert_eq!(run(READ_TEXT_SCRIPT, &name, &[]).unwrap(), b"remote");
     }
 }

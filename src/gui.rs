@@ -143,6 +143,7 @@ fn forget_device(state: tauri::State<'_, DesktopState>) -> Result<(), String> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Options {
     auto_connect: bool,
+    text_clipboard: bool,
     image_clipboard: bool,
     file_clipboard: bool,
 }
@@ -150,6 +151,7 @@ struct Options {
 fn set_options(options: Options, state: tauri::State<'_, DesktopState>) -> Result<(), String> {
     state.send(Command::Options {
         auto: options.auto_connect,
+        text: options.text_clipboard,
         image: options.image_clipboard,
         files: options.file_clipboard,
     })

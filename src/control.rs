@@ -38,6 +38,7 @@ pub struct ProcessBackend {
     latest: Arc<Mutex<Option<ServiceEvent>>>,
     readers: Vec<std::thread::JoinHandle<()>>,
     transfers: Arc<Mutex<crate::service_event::TransferTracker>>,
+    capabilities: Arc<Mutex<Option<crate::service_event::ClipboardCapabilities>>>,
 }
 
 impl ControlBackend for ProcessBackend {
@@ -49,6 +50,7 @@ impl ControlBackend for ProcessBackend {
                     self.child = None;
                     self.child_stdin = None;
                     *self.transfers.lock().unwrap() = Default::default();
+                    self.capabilities.lock().unwrap().take();
                     self.status = ServiceEvent {
                         state: ServiceState::Error,
                         message: Some(format!("服务已退出: {status}")),
@@ -263,6 +265,7 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
     sender: SyncSender<String>,
     events: Option<Arc<Mutex<Option<ServiceEvent>>>>,
     transfers: Option<Arc<Mutex<crate::service_event::TransferTracker>>>,
+    capabilities: Option<Arc<Mutex<Option<crate::service_event::ClipboardCapabilities>>>>,
 ) -> std::thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut reader = BufReader::new(reader);
@@ -297,6 +300,13 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
             }
             let line = String::from_utf8_lossy(&bytes).trim_end().to_string();
             if !truncated {
+                if let (Some(slot), Some(event)) = (
+                    &capabilities,
+                    crate::service_event::parse_capabilities(&line),
+                ) {
+                    *slot.lock().unwrap() = Some(event);
+                    continue;
+                }
                 if let (Some(slot), Some(event)) =
                     (&transfers, crate::service_event::parse_transfer(&line))
                 {
@@ -304,6 +314,21 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
                     continue;
                 }
                 if let (Some(slot), Some(event)) = (&events, crate::service_event::parse(&line)) {
+                    if matches!(
+                        event.state,
+                        ServiceState::Retrying
+                            | ServiceState::Stopped
+                            | ServiceState::Error
+                            | ServiceState::Listening
+                            | ServiceState::Connecting
+                    ) {
+                        if let Some(capabilities) = &capabilities {
+                            capabilities.lock().unwrap().take();
+                        }
+                        if let Some(transfers) = &transfers {
+                            *transfers.lock().unwrap() = Default::default();
+                        }
+                    }
                     *slot.lock().unwrap() = Some(event);
                     continue;
                 }
@@ -326,12 +351,20 @@ impl Default for ProcessBackend {
             latest: Arc::new(Mutex::new(None)),
             readers: Vec::new(),
             transfers: Arc::new(Mutex::new(Default::default())),
+            capabilities: Arc::new(Mutex::new(None)),
         }
     }
 }
 impl ProcessBackend {
+    pub fn clipboard_capabilities(&self) -> Option<crate::service_event::ClipboardCapabilities> {
+        if self.child.is_some() && self.status.state == ServiceState::Connected {
+            *self.capabilities.lock().unwrap()
+        } else {
+            None
+        }
+    }
     pub fn transfer_status(&self) -> Option<crate::service_event::TransferEvent> {
-        if self.child.is_some() {
+        if self.child.is_some() && self.status.state == ServiceState::Connected {
             self.transfers.lock().unwrap().latest.clone()
         } else {
             None
@@ -349,6 +382,7 @@ impl ProcessBackend {
         }
         self.latest.lock().unwrap().take();
         *self.transfers.lock().unwrap() = Default::default();
+        self.capabilities.lock().unwrap().take();
         self.child_stdin = None;
         self.receiver = None;
         self.status = ServiceEvent {
@@ -365,16 +399,19 @@ impl ProcessBackend {
         let (tx, rx) = mpsc::sync_channel(512);
         self.latest.lock().unwrap().take();
         *self.transfers.lock().unwrap() = Default::default();
+        self.capabilities.lock().unwrap().take();
         if let Some(out) = child.stdout.take() {
             self.readers.push(spawn_log_reader(
                 out,
                 tx.clone(),
                 Some(self.latest.clone()),
                 Some(self.transfers.clone()),
+                Some(self.capabilities.clone()),
             ));
         }
         if let Some(err) = child.stderr.take() {
-            self.readers.push(spawn_log_reader(err, tx, None, None));
+            self.readers
+                .push(spawn_log_reader(err, tx, None, None, None));
         }
         self.child_stdin = child.stdin.take();
         self.receiver = Some(rx);
@@ -391,6 +428,7 @@ impl ProcessBackend {
         key: &std::path::Path,
         image: bool,
         files: bool,
+        text: bool,
     ) -> std::io::Result<()> {
         if self.is_running() {
             return Ok(());
@@ -408,6 +446,8 @@ impl ProcessBackend {
             if image { "on" } else { "off" },
             "--file-clipboard",
             if files { "on" } else { "off" },
+            "--text-clipboard",
+            if text { "on" } else { "off" },
         ]);
         self.spawn(cmd)
     }

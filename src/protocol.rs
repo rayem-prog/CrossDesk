@@ -34,6 +34,10 @@ pub enum FrameKind {
     FileCancel = 21,
     TransferResult = 22,
     FileManifest = 23,
+    TextStart = 24,
+    TextChunk = 25,
+    TextEnd = 26,
+    TextCancel = 27,
 }
 
 impl FrameKind {
@@ -62,6 +66,10 @@ impl FrameKind {
             21 => Ok(Self::FileCancel),
             22 => Ok(Self::TransferResult),
             23 => Ok(Self::FileManifest),
+            24 => Ok(Self::TextStart),
+            25 => Ok(Self::TextChunk),
+            26 => Ok(Self::TextEnd),
+            27 => Ok(Self::TextCancel),
             _ => Err(invalid("unknown frame kind")),
         }
     }
@@ -119,6 +127,7 @@ pub struct Hello {
     pub screen_height: Option<u32>,
     pub image_clipboard: bool,
     pub file_clipboard: bool,
+    pub text_clipboard: bool,
 }
 
 pub fn read_frame(reader: &mut impl Read) -> std::io::Result<Frame> {
@@ -161,7 +170,8 @@ pub fn hello_payload() -> Vec<u8> {
     out.push(Platform::local().as_byte());
     out.push(
         u8::from(crate::transport::image_clipboard_enabled())
-            | (u8::from(crate::transport::file_clipboard_enabled()) << 1),
+            | (u8::from(crate::transport::file_clipboard_enabled()) << 1)
+            | (u8::from(crate::transport::text_clipboard_enabled()) << 2),
     );
     out
 }
@@ -215,6 +225,7 @@ pub fn decode_hello(payload: &[u8]) -> std::io::Result<Hello> {
         screen_height,
         image_clipboard: version >= 5 && payload.get(3).is_some_and(|v| v & 1 != 0),
         file_clipboard: version >= 6 && payload.get(3).is_some_and(|v| v & 2 != 0),
+        text_clipboard: version >= 7 && payload.get(3).is_some_and(|v| v & 4 != 0),
     })
 }
 
@@ -447,6 +458,14 @@ mod tests {
         assert!(hello.image_clipboard && hello.file_clipboard);
         assert_eq!(hello.screen_width, Some(1512));
         assert_eq!(hello.screen_height, Some(982));
+        assert!(!hello.text_clipboard, "0.5.0 must negotiate text off");
+        let text = decode_hello(&[0, 7, 2, 7, 0, 0, 5, 232, 0, 0, 3, 214]).unwrap();
+        assert!(text.text_clipboard && text.image_clipboard && text.file_clipboard);
+        assert_eq!(
+            (text.screen_width, text.screen_height),
+            (Some(1512), Some(982))
+        );
+        validate_version(text).unwrap();
         validate_version(hello).unwrap();
     }
 
@@ -498,6 +517,7 @@ mod tests {
                 screen_height: None,
                 image_clipboard: false,
                 file_clipboard: false,
+                text_clipboard: false,
             })
             .is_err()
         );
@@ -508,6 +528,16 @@ mod tests {
         let bytes = [255u8, 0, 0, 0, 0, 0, 0, 0, 4, b't', b'e', b's', b't'];
         let err = read_frame(&mut std::io::Cursor::new(bytes)).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn text_frames_are_accepted_without_changing_the_v7_envelope() {
+        for byte in 24u8..=27 {
+            let bytes = [byte, 0, 0, 0, 0, 0, 0, 0, 1, 42];
+            let frame = read_frame(&mut std::io::Cursor::new(bytes)).unwrap();
+            assert_eq!(frame.kind as u8, byte);
+            assert_eq!(frame.payload, [42]);
+        }
     }
 
     #[test]

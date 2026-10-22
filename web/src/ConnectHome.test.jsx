@@ -71,3 +71,17 @@ test('a remembered incompatible device explains why reconnection is disabled',()
  expect(screen.getByRole('button',{name:'连接设备'}).disabled).toBe(true);
  expect(screen.getByText(/请将两端升级/)).toBeTruthy();
 });
+test.each([
+ ['waiting','send','等待对方写入文字剪贴板'],
+ ['waiting','receive','等待写入本机文字剪贴板'],
+ ['ready','receive','文字已同步'],
+ ['skipped','receive','文字同步已跳过'],
+ ['failed','send','文字同步失败'],
+])('text %s %s has a text-specific accessible status',(state,direction,label)=>{
+ render(<ConnectHome {...props({...base,state:'connected',transfer:{kind:'text',id:'text-copy',state,direction,message:'已有更新的本地复制内容；请在发送端重新复制'}})}/>);
+ const status=screen.getByRole('status',{name:'文字同步'});
+ expect(within(status).getByText(label)).toBeTruthy();
+ expect(status.textContent).toContain('已有更新的本地复制内容');
+ expect(screen.queryByRole('status',{name:'文件与文件夹传输'})).toBeNull();
+ expect(screen.getByText('已连接')).toBeTruthy();
+});
