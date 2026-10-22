@@ -19,7 +19,102 @@ fn cancelled_text_event_fixture() {
         })
         .unwrap();
     receive_text(frames.remove(0), 0, &mailbox, &writer).unwrap();
-    receive_text(text_transfer::cancel(transfer.id), 0, &mailbox, &writer).unwrap();
+    match std::env::var("CROSSDESK_TEXT_CANCEL_FIXTURE")
+        .unwrap()
+        .as_str()
+    {
+        "replaced" => {
+            for frame in frames {
+                receive_text(frame, 0, &mailbox, &writer).unwrap();
+            }
+            let mut png = std::io::Cursor::new(Vec::new());
+            image::RgbaImage::from_pixel(1, 1, image::Rgba([4, 2, 3, 255]))
+                .write_to(&mut png, image::ImageFormat::Png)
+                .unwrap();
+            let transfer =
+                Transfer::from_clipboard(&ClipboardPayload::Bitmap(png.into_inner())).unwrap();
+            enqueue(
+                &mailbox,
+                RemoteDelivery::Image(Delivery {
+                    transfer,
+                    revision: 0,
+                }),
+                &writer,
+            );
+        }
+        "short" => assert!(
+            receive_text(Frame::new(FrameKind::TextEnd, vec![]), 0, &mailbox, &writer).is_err()
+        ),
+        "wrong" => {
+            let mut payload = vec![99; 16];
+            payload.extend_from_slice(&0u32.to_be_bytes());
+            payload.push(b'x');
+            assert!(
+                receive_text(
+                    Frame::new(FrameKind::TextChunk, payload),
+                    0,
+                    &mailbox,
+                    &writer
+                )
+                .is_err()
+            );
+        }
+        _ => receive_text(text_transfer::cancel(transfer.id), 0, &mailbox, &writer).unwrap(),
+    }
+}
+
+#[test]
+#[cfg(feature = "gui")]
+fn malformed_text_reports_failure_for_the_discarded_active_batch() {
+    for mode in ["short", "wrong"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "clipboard::session::text_tests::cancelled_text_event_fixture",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("CROSSDESK_TEXT_CANCEL_FIXTURE", mode)
+            .env("DESKBRIDGE_GUI_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let events: Vec<_> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .filter_map(crate::service_event::parse_transfer)
+            .collect();
+        assert_eq!(
+            events.last().unwrap().state,
+            TransferState::Failed,
+            "discarded {mode} batch has no terminal status"
+        );
+        assert_eq!(events.first().unwrap().id, events.last().unwrap().id);
+    }
+}
+
+#[test]
+#[cfg(feature = "gui")]
+fn replacing_queued_text_with_an_image_reports_the_text_as_skipped() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "clipboard::session::text_tests::cancelled_text_event_fixture",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("CROSSDESK_TEXT_CANCEL_FIXTURE", "replaced")
+        .env("DESKBRIDGE_GUI_CHILD", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let events: Vec<_> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter_map(crate::service_event::parse_transfer)
+        .collect();
+    assert_eq!(events.last().unwrap().state, TransferState::Skipped);
+    assert_eq!(events.first().unwrap().id, events.last().unwrap().id);
 }
 
 #[test]
@@ -72,10 +167,7 @@ fn invalid_native_text_is_consumed_once_instead_of_retried_forever() {
         }
         fn read(&mut self) -> io::Result<Option<ClipboardPayload>> {
             self.0.fetch_add(1, Ordering::AcqRel);
-            Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid native text",
-            ))
+            Err(text_transfer::invalid("invalid native text"))
         }
         fn write(&mut self, _: &ClipboardPayload) -> io::Result<()> {
             unreachable!()

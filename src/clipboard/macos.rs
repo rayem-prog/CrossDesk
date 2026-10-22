@@ -144,12 +144,8 @@ fn read_text() -> std::io::Result<Option<String>> {
 }
 
 fn decode_text_output(output: std::process::Output) -> std::io::Result<Option<String>> {
-    let invalid = || {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "text is empty, invalid, contains NUL, or exceeds 1 MiB",
-        )
-    };
+    let invalid =
+        || crate::text_transfer::invalid("text is empty, invalid, contains NUL, or exceeds 1 MiB");
     // The subprocess diagnostic is untrusted and must never appear in events.
     if !output.status.success() {
         return Err(invalid());

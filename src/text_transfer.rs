@@ -7,8 +7,23 @@ use std::time::{Duration, Instant};
 pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
-fn invalid(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
+#[derive(Debug)]
+struct RejectedText(&'static str);
+impl std::fmt::Display for RejectedText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for RejectedText {}
+
+pub fn is_rejection(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|error| error.is::<RejectedText>())
+}
+
+pub fn invalid(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, RejectedText(message))
 }
 
 /// Normalize line endings without trimming or changing any other character.
@@ -208,6 +223,15 @@ mod tests {
     use super::*;
     use crate::protocol::{CHUNK_SIZE, MAX_FRAME_PAYLOAD_SIZE, read_frame, write_frame};
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn text_rejections_are_distinct_from_invalid_image_or_file_data() {
+        assert!(is_rejection(&normalize("bad\0text").unwrap_err()));
+        assert!(!is_rejection(&io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid image"
+        )));
+    }
 
     fn start(id: [u8; 16], data: &[u8]) -> Frame {
         let mut payload = id.to_vec();

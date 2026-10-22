@@ -92,6 +92,14 @@ fn enqueue(mailbox: &Mailbox, delivery: RemoteDelivery, writer: &SharedWriter) {
     let old = mailbox.pending.lock().unwrap().replace(delivery);
     if let Some(old) = old {
         let _ = writer.write(wire::result(old.id(), 1));
+        if matches!(&old, RemoteDelivery::Text(_)) {
+            text_status(
+                old.id(),
+                TransferDirection::Receive,
+                TransferState::Skipped,
+                "已由更新的远端复制内容替代",
+            );
+        }
     }
     mailbox.changed.notify_all();
 }
@@ -387,6 +395,14 @@ fn receive_text(
         ));
     }
     let mut receiver = mailbox.text_receiver.lock().unwrap();
+    let active = receiver.incoming.active_id();
+    // Invalid metadata also clears the assembly. Attribute its terminal result
+    // to that discarded batch, rather than a corrupt or absent incoming ID.
+    let failed_id = if frame.kind == FrameKind::TextStart {
+        id.or(active)
+    } else {
+        active.or(id)
+    };
     let cancelled =
         frame.kind == FrameKind::TextCancel && id.is_some() && receiver.incoming.active_id() == id;
     if frame.kind == FrameKind::TextStart {
@@ -429,7 +445,7 @@ fn receive_text(
             Ok(())
         }
         Err(error) => {
-            if let Some(id) = id {
+            if let Some(id) = failed_id {
                 let _ = writer.write(wire::result(id, 2));
                 text_status(
                     id,
@@ -749,7 +765,9 @@ fn worker_loop<C: ClipboardApi>(
                             // A rejected copy is terminal for this native revision; a new
                             // explicit copy is required to retry, even with identical text.
                             revision = current;
-                            if mailbox.texts_enabled.load(Ordering::Acquire) {
+                            if text_transfer::is_rejection(&error)
+                                && mailbox.texts_enabled.load(Ordering::Acquire)
+                            {
                                 let mut id = [0; 16];
                                 if getrandom::getrandom(&mut id).is_ok() {
                                     text_status(

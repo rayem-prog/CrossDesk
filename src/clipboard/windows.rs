@@ -287,10 +287,12 @@ fn decode_text(bytes: &[u8]) -> std::io::Result<String> {
         words.push(word);
     }
     if !terminated {
-        return Err(invalid_data("unterminated UTF-16 clipboard text"));
+        return Err(crate::text_transfer::invalid(
+            "unterminated UTF-16 clipboard text",
+        ));
     }
-    let text =
-        String::from_utf16(&words).map_err(|_| invalid_data("invalid UTF-16 clipboard text"))?;
+    let text = String::from_utf16(&words)
+        .map_err(|_| crate::text_transfer::invalid("invalid UTF-16 clipboard text"))?;
     crate::text_transfer::normalize(&text)
 }
 
