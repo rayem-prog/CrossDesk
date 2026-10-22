@@ -67,6 +67,7 @@ fn contextual(path: &Path, error: io::Error) -> io::Error {
 struct SourceNode {
     path: PathBuf,
     metadata: Metadata,
+    children: Vec<std::ffi::OsString>,
     #[cfg(windows)]
     identity: WindowsIdentity,
 }
@@ -169,6 +170,7 @@ impl SourceTree {
         });
         self.nodes.push(SourceNode {
             path: path.to_owned(),
+            children: Vec::new(),
             #[cfg(windows)]
             identity: {
                 let file = windows_source(path)?;
@@ -191,6 +193,10 @@ impl SourceTree {
                 children.push(child?.path());
             }
             children.sort();
+            self.nodes[index].children = children
+                .iter()
+                .map(|path| path.file_name().unwrap().to_os_string())
+                .collect();
             for child in children {
                 self.visit(&child, Some(index as u16), depth + 1, cancel)
                     .map_err(|e| contextual(&child, e))?;
@@ -222,6 +228,23 @@ impl SourceTree {
         for index in 0..self.nodes.len() {
             cancelled(cancel)?;
             self.check(index)?;
+            let node = &self.nodes[index];
+            if node.metadata.is_dir() {
+                // Directory write times may be cached on Windows. Re-enumerate
+                // exact child names as well, with the original bounded count.
+                let mut children = Vec::with_capacity(node.children.len());
+                for child in fs::read_dir(&node.path)? {
+                    cancelled(cancel)?;
+                    if children.len() >= node.children.len() {
+                        return Err(invalid("source directory gained an entry; copy again"));
+                    }
+                    children.push(child?.file_name());
+                }
+                children.sort();
+                if children != node.children {
+                    return Err(invalid("source directory entries changed; copy again"));
+                }
+            }
         }
         Ok(())
     }
