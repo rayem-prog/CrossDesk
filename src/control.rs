@@ -1,8 +1,10 @@
+use crate::diagnostics::{DiagnosticState, DiagnosticView};
 use crate::service_event::{ServiceEvent, ServiceState};
 use std::collections::VecDeque;
 use std::io::{BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -14,6 +16,13 @@ use crate::protocol::ClipboardPayload;
 use crate::server::Edge;
 
 const MAX_LOG_LINES: usize = 500;
+static NEXT_DIAGNOSTIC_RUN: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Default)]
+struct DiagnosticTracker {
+    expected: Option<u64>,
+    view: DiagnosticView,
+}
 
 /// Backend contract used by the GUI. The UI owns presentation only; process
 /// lifecycle, command construction, logging, and clipboard publishing live here.
@@ -37,6 +46,7 @@ pub struct ProcessBackend {
     status: ServiceEvent,
     latest: Arc<Mutex<Option<ServiceEvent>>>,
     readers: Vec<std::thread::JoinHandle<()>>,
+    diagnostics: Arc<Mutex<DiagnosticTracker>>,
     transfers: Arc<Mutex<crate::service_event::TransferTracker>>,
     capabilities: Arc<Mutex<Option<crate::service_event::ClipboardCapabilities>>>,
 }
@@ -49,6 +59,7 @@ impl ControlBackend for ProcessBackend {
                     self.push_log(format!("Service exited: {status}"));
                     self.child = None;
                     self.child_stdin = None;
+                    *self.diagnostics.lock().unwrap() = Default::default();
                     *self.transfers.lock().unwrap() = Default::default();
                     self.capabilities.lock().unwrap().take();
                     self.status = ServiceEvent {
@@ -84,6 +95,7 @@ impl ControlBackend for ProcessBackend {
     }
 
     fn stop(&mut self) -> std::io::Result<()> {
+        *self.diagnostics.lock().unwrap() = Default::default();
         let Some(mut child) = self.child.take() else {
             self.finish_stop();
             return Ok(());
@@ -119,6 +131,9 @@ impl ControlBackend for ProcessBackend {
     fn collect_logs(&mut self) {
         let event = self.latest.lock().unwrap().take();
         if let Some(event) = event.filter(|_| self.child.is_some()) {
+            if event.state != ServiceState::Connected {
+                *self.diagnostics.lock().unwrap() = Default::default();
+            }
             self.status = event;
         }
         if let Some(receiver) = &self.receiver {
@@ -266,6 +281,7 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
     events: Option<Arc<Mutex<Option<ServiceEvent>>>>,
     transfers: Option<Arc<Mutex<crate::service_event::TransferTracker>>>,
     capabilities: Option<Arc<Mutex<Option<crate::service_event::ClipboardCapabilities>>>>,
+    diagnostics: Option<Arc<Mutex<DiagnosticTracker>>>,
 ) -> std::thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut reader = BufReader::new(reader);
@@ -300,6 +316,19 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
             }
             let line = String::from_utf8_lossy(&bytes).trim_end().to_string();
             if !truncated {
+                if let Some(event) = crate::diagnostics::parse_event(&line) {
+                    if let Some(slot) = &diagnostics {
+                        let mut tracker = slot.lock().unwrap();
+                        if event.run_id.is_some()
+                            && event.run_id == tracker.expected
+                            && event.state != DiagnosticState::Idle
+                            && tracker.view.state == DiagnosticState::Collecting
+                        {
+                            tracker.view = event;
+                        }
+                    }
+                    continue;
+                }
                 if let (Some(slot), Some(event)) = (
                     &capabilities,
                     crate::service_event::parse_capabilities(&line),
@@ -314,6 +343,11 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
                     continue;
                 }
                 if let (Some(slot), Some(event)) = (&events, crate::service_event::parse(&line)) {
+                    if event.state != ServiceState::Connected {
+                        if let Some(diagnostics) = &diagnostics {
+                            *diagnostics.lock().unwrap() = Default::default();
+                        }
+                    }
                     if matches!(
                         event.state,
                         ServiceState::Retrying
@@ -350,12 +384,68 @@ impl Default for ProcessBackend {
             },
             latest: Arc::new(Mutex::new(None)),
             readers: Vec::new(),
+            diagnostics: Arc::new(Mutex::new(Default::default())),
             transfers: Arc::new(Mutex::new(Default::default())),
             capabilities: Arc::new(Mutex::new(None)),
         }
     }
 }
 impl ProcessBackend {
+    pub fn diagnostics(&self) -> DiagnosticView {
+        if self.child.is_some() && self.status.state == ServiceState::Connected {
+            self.diagnostics.lock().unwrap().view.clone()
+        } else {
+            DiagnosticView::default()
+        }
+    }
+    pub fn start_diagnostics(&mut self) -> std::io::Result<()> {
+        self.collect_logs();
+        if !self.is_running() || self.status.state != ServiceState::Connected {
+            return Err(std::io::Error::other("请先连接设备"));
+        }
+        let id = NEXT_DIAGNOSTIC_RUN
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .map_err(|_| std::io::Error::other("诊断运行编号已耗尽"))?;
+        {
+            let mut tracker = self.diagnostics.lock().unwrap();
+            if tracker.view.state == DiagnosticState::Collecting {
+                return Err(std::io::Error::other("诊断正在收集中"));
+            }
+            tracker.expected = Some(id);
+            tracker.view = DiagnosticView {
+                run_id: Some(id),
+                state: DiagnosticState::Collecting,
+                remaining_seconds: 60,
+                report: None,
+            };
+        }
+        let result = self.send_diagnostic_command(&format!("diagnostics start {id}\n"));
+        if result.is_err() {
+            let mut tracker = self.diagnostics.lock().unwrap();
+            if tracker.expected == Some(id) {
+                *tracker = Default::default();
+            }
+        }
+        result
+    }
+    pub fn stop_diagnostics(&mut self) -> std::io::Result<()> {
+        self.collect_logs();
+        if !self.is_running() {
+            return Ok(());
+        }
+        if self.diagnostics().state == DiagnosticState::Collecting {
+            self.send_diagnostic_command("diagnostics stop\n")?;
+        }
+        Ok(())
+    }
+    fn send_diagnostic_command(&mut self, command: &str) -> std::io::Result<()> {
+        let stdin = self
+            .child_stdin
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("服务控制通道不可用"))?;
+        stdin.write_all(command.as_bytes())?;
+        stdin.flush()
+    }
     pub fn clipboard_capabilities(&self) -> Option<crate::service_event::ClipboardCapabilities> {
         if self.child.is_some() && self.status.state == ServiceState::Connected {
             *self.capabilities.lock().unwrap()
@@ -381,6 +471,7 @@ impl ProcessBackend {
             let _ = t.join();
         }
         self.latest.lock().unwrap().take();
+        *self.diagnostics.lock().unwrap() = Default::default();
         *self.transfers.lock().unwrap() = Default::default();
         self.capabilities.lock().unwrap().take();
         self.child_stdin = None;
@@ -398,6 +489,7 @@ impl ProcessBackend {
         let mut child = command.spawn()?;
         let (tx, rx) = mpsc::sync_channel(512);
         self.latest.lock().unwrap().take();
+        *self.diagnostics.lock().unwrap() = Default::default();
         *self.transfers.lock().unwrap() = Default::default();
         self.capabilities.lock().unwrap().take();
         if let Some(out) = child.stdout.take() {
@@ -407,11 +499,12 @@ impl ProcessBackend {
                 Some(self.latest.clone()),
                 Some(self.transfers.clone()),
                 Some(self.capabilities.clone()),
+                Some(self.diagnostics.clone()),
             ));
         }
         if let Some(err) = child.stderr.take() {
             self.readers
-                .push(spawn_log_reader(err, tx, None, None, None));
+                .push(spawn_log_reader(err, tx, None, None, None, None));
         }
         self.child_stdin = child.stdin.take();
         self.receiver = Some(rx);

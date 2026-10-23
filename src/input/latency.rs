@@ -19,14 +19,14 @@ pub enum Stage {
 }
 
 #[derive(Default)]
-struct Histogram {
+pub(crate) struct Histogram {
     buckets: [u64; 17],
     count: u64,
     max_us: u64,
 }
 
 impl Histogram {
-    fn record(&mut self, duration: Duration) {
+    pub(crate) fn record(&mut self, duration: Duration) {
         // Round up so positive sub-microsecond durations remain visible.
         let micros = duration.as_nanos().div_ceil(1_000).min(u64::MAX as u128) as u64;
         let bucket = BUCKET_US
@@ -48,6 +48,29 @@ impl Histogram {
             }
         }
         self.max_us
+    }
+
+    pub(crate) fn summary(&self, name: &str) -> crate::diagnostics::StageMetrics {
+        crate::diagnostics::StageMetrics {
+            name: name.into(),
+            count: self.count,
+            p50_us: if self.count == 0 {
+                0
+            } else {
+                self.percentile(50)
+            },
+            p95_us: if self.count == 0 {
+                0
+            } else {
+                self.percentile(95)
+            },
+            p99_us: if self.count == 0 {
+                0
+            } else {
+                self.percentile(99)
+            },
+            max_us: self.max_us,
+        }
     }
 }
 
@@ -84,10 +107,11 @@ impl LatencyStats {
     }
 
     pub fn enabled(&self) -> bool {
-        self.enabled
+        self.enabled || crate::diagnostics::collecting()
     }
 
     pub fn record(&mut self, stage: Stage, duration: Duration) {
+        crate::diagnostics::record(stage, duration);
         if self.enabled {
             self.histograms[stage as usize].record(duration);
         }
@@ -96,6 +120,7 @@ impl LatencyStats {
     /// Observe one consumed queue record. `samples` includes its original event;
     /// the additional original events count as coalesced samples.
     pub fn queue(&mut self, depth: usize, samples: u64) {
+        crate::diagnostics::queue(depth, samples);
         if self.enabled {
             self.max_queue_depth = self.max_queue_depth.max(depth);
             self.coalesced_samples = self

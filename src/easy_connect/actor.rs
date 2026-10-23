@@ -55,6 +55,15 @@ impl Controller {
     pub fn view(&self) -> ConnectView {
         self.view.lock().unwrap().clone()
     }
+    /// Small native-tray snapshot; avoids copying logs and reports while hidden.
+    pub fn connection_status(&self) -> (String, bool, Option<String>) {
+        let view = self.view.lock().unwrap();
+        (
+            view.state.clone(),
+            view.devices.iter().any(|d| d.paired),
+            view.error.clone(),
+        )
+    }
     pub fn submit(&self, command: Command) -> io::Result<()> {
         self.tx
             .try_send(command)

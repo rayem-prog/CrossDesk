@@ -1,3 +1,25 @@
+# CrossDesk 0.6.2 validation — 2026-10-23
+
+Background operation is explicit: hiding preserves the Rust controller, window close and tray quit still run asynchronous shutdown. Native tray setup failure keeps a reachable window. Login startup is opt-in through the official Tauri plugin, uses `gui --background`, reads actual OS state and reports failure. Tests never enable login items or launch the real user application.
+
+Diagnostic capture uses bounded histograms, a parent-generated run ID, typed stdout events, and child stdin start/stop. The monotonic 60-second deadline does not depend on a WebView or incoming events. A session guard clears capture; parent tracking clears on disconnect/exit/restart and ignores stale or post-terminal updates. Reports omit input/clipboard values, addresses and keys. Queue peaks are scoped by diagnostic run, including the regression with historical peak 3 and new peak 1. Default disabled paths check an atomic run ID.
+
+## Local checks
+
+- GUI Rust: **208 passed / 4 ignored** (two ignored subprocess fixtures are invoked by their parent tests; other ignored tests require explicit release/native execution).
+- CLI Rust: **156 passed / 2 ignored**.
+- Web: **37 passed**, including native-hidden startup with a visible DOM, stale visibility snapshots, nonoverlapping polling, resume refresh, login failure, diagnostics and export controls. Production build passed.
+- Source-package regression: **1 passed**.
+- Native GUI compilation on Mac passed. Windows GUI cross-check is unavailable locally because `x86_64-w64-mingw32-gcc` is absent; native Windows CI is required for that build, rather than claiming a local GUI cross-pass.
+- New capture, expiry, CLI command, native lifecycle, backend correlation, visibility and queue-epoch behavior was tested with observed RED-to-GREEN failures. A real isolated child exercises diagnostic stdin/start/stop and clean exit without creating an input sink, clipboard or window.
+- Frontend resource work is verified by request counts: visible 600 ms polling; hidden zero recurring polls; initial native-hidden launch stops after its first visibility handshake. Full native idle CPU and login/OS tray usability were not measured by these tests. Delivery results record the separate reproducible input-loop comparison and native CI results.
+
+No live CrossDesk instance is replaced or restarted, no general clipboard is intentionally modified, and no physical two-device acceptance gate or formal release is added. The 0.7.0 independent transport change is deferred. Native artifacts, source identities and checksums are recorded with the final delivery.
+
+---
+
+## Previous 0.6.1 evidence
+
 # CrossDesk 0.6.1 validation — 2026-10-22
 
 ## Mouse pipeline implementation and regression scope
