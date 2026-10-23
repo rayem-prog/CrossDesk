@@ -12,11 +12,11 @@ Goal: background operation and one-click local diagnostics, preserving close-to-
 
 ## Tasks
 
-- [ ] Test lifecycle rules before implementing tray/autostart. Keep native actions behind a boundary and never register login items during tests.
-- [ ] Test capture deadline, opt-in, reset and report validation before implementing the diagnostic core and input integration.
-- [ ] Test real stdin/stdout correlation and disconnect cleanup before integrating ProcessBackend/Core.
-- [ ] Test visible UI behavior, login errors, empty metrics and visibility polling before implementing frontend.
-- [ ] Add GUI `--background` parsing and bump own versions to 0.6.2; keep protocol and dependency versions except required plugin.
+- [x] Test lifecycle rules before implementing tray/autostart. Keep native actions behind a boundary and never register login items during tests.
+- [x] Test capture deadline, opt-in, reset and report validation before implementing the diagnostic core and input integration.
+- [x] Test real stdin/stdout correlation and disconnect cleanup before integrating ProcessBackend/Core.
+- [x] Test visible UI behavior, login errors, empty metrics and visibility polling before implementing frontend.
+- [x] Add GUI `--background` parsing and bump own versions to 0.6.2; keep protocol and dependency versions except required plugin.
 - [ ] Run CLI/GUI/web/native regressions, packaging checks, and opt-in overhead/idle comparisons without launching the user's live app.
 - [ ] Commit, push, create/attach a draft PR based on codex/mouse-latency; build separate-path Mac app and native Windows installer with corresponding sources.
 

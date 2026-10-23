@@ -22,10 +22,27 @@ struct State {
     events: VecDeque<TimedInput>,
     closed: bool,
     peak: usize,
+    peak_epoch: u64,
+}
+impl State {
+    fn observe_peak_epoch(&mut self, epoch: u64) {
+        if self.peak_epoch != epoch {
+            self.peak_epoch = epoch;
+            self.peak = self.events.len();
+        }
+    }
 }
 impl EventQueue {
     pub fn take_peak_depth(&self) -> usize {
+        self.take_peak_in_epoch(crate::diagnostics::active_run_id())
+    }
+    fn take_peak_in_epoch(&self, epoch: u64) -> usize {
         let mut state = self.state.lock().unwrap();
+        // Usually observed before the pop. Also cover a run starting between pop and sample.
+        if state.peak_epoch != epoch {
+            state.peak_epoch = epoch;
+            state.peak = (state.events.len() + 1).min(self.capacity);
+        }
         let peak = state.peak;
         state.peak = state.events.len();
         peak
@@ -39,6 +56,7 @@ impl EventQueue {
     }
     pub fn push(&self, event: InputEvent) -> io::Result<()> {
         let mut state = self.state.lock().unwrap();
+        state.observe_peak_epoch(crate::diagnostics::active_run_id());
         if state.closed {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -67,7 +85,9 @@ impl EventQueue {
         Ok(())
     }
     pub fn try_pop(&self) -> Option<TimedInput> {
-        self.state.lock().unwrap().events.pop_front()
+        let mut state = self.state.lock().unwrap();
+        state.observe_peak_epoch(crate::diagnostics::active_run_id());
+        state.events.pop_front()
     }
     pub fn recv(&self) -> Option<TimedInput> {
         let state = self.state.lock().unwrap();
@@ -75,6 +95,7 @@ impl EventQueue {
             .ready
             .wait_while(state, |state| state.events.is_empty() && !state.closed)
             .unwrap();
+        state.observe_peak_epoch(crate::diagnostics::active_run_id());
         state.events.pop_front()
     }
     pub fn recv_timeout(&self, timeout: Duration) -> Option<TimedInput> {
@@ -85,6 +106,7 @@ impl EventQueue {
                 state.events.is_empty() && !state.closed
             })
             .unwrap();
+        state.observe_peak_epoch(crate::diagnostics::active_run_id());
         state.events.pop_front()
     }
     pub fn close(&self) {
@@ -242,5 +264,16 @@ mod tests {
         queue.try_pop().unwrap();
         assert_eq!(queue.take_peak_depth(), 3);
         assert_eq!(queue.take_peak_depth(), 1);
+    }
+    #[test]
+    fn diagnostic_run_does_not_inherit_a_drained_historical_peak() {
+        let queue = EventQueue::new(8);
+        for dx in [1, -1, 1] {
+            queue.push(motion(dx, 0)).unwrap();
+        }
+        while queue.try_pop().is_some() {}
+        queue.push(motion(1, 0)).unwrap();
+        queue.try_pop().unwrap();
+        assert_eq!(queue.take_peak_in_epoch(7), 1);
     }
 }

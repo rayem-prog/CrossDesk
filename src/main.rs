@@ -6,6 +6,7 @@ mod clipboard;
 mod config;
 mod control;
 mod desktop;
+mod diagnostics;
 #[cfg(feature = "discovery")]
 mod discovery;
 #[cfg(feature = "gui")]
@@ -22,6 +23,8 @@ mod pairing;
 mod platform;
 mod pointer;
 mod protocol;
+#[cfg(feature = "gui")]
+mod resident;
 mod secure;
 mod server;
 mod service_event;
@@ -139,7 +142,7 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
             "--file-clipboard",
             "--text-clipboard",
         ],
-        "gui" => &[],
+        "gui" => &["--background"],
         _ => return Err(format!("unknown command: {verb}")),
     };
     let mut seen = std::collections::HashSet::new();
@@ -148,6 +151,10 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
         let key = args[index].as_str();
         if !allowed.contains(&key) || !seen.insert(key) {
             return Err(format!("unknown or duplicate option: {key}"));
+        }
+        if key == "--background" {
+            index += 1;
+            continue;
         }
         if args
             .get(index + 1)
@@ -200,7 +207,7 @@ fn print_usage() {
 Use the same crossdesk.key on both machines. Both horizontal edges are enabled by default.
 Emergency release on Windows: Ctrl+Alt+Esc or Scroll Lock.
 Plain text, image and ordinary file clipboard sync are on by default. Copy screenshots, PDFs, documents or ZIP files after connecting.
-Both computers must support protocol v7; CrossDesk 0.6.1 on both is recommended. Text sync requires CrossDesk 0.6.0 or later with text sync enabled on both computers. Files/folders: 512 MiB per file, 2 GiB/batch, 64 roots, 10,000 entries, 32 levels. Plain text: normalized UTF-8, 1 MiB maximum. Resume is outside this mode.",
+Both computers must support protocol v7; CrossDesk 0.6.2 on both is recommended. Text sync requires CrossDesk 0.6.0 or later with text sync enabled on both computers. Files/folders: 512 MiB per file, 2 GiB/batch, 64 roots, 10,000 entries, 32 levels. Plain text: normalized UTF-8, 1 MiB maximum. Resume is outside this mode.",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -210,6 +217,21 @@ mod tests {
     use super::*;
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(str::to_string).collect()
+    }
+    #[test]
+    fn background_is_a_gui_only_flag_and_rejects_duplicates_or_values() {
+        assert!(matches!(
+            parse_args(&args("gui --background")).unwrap(),
+            Command::Gui
+        ));
+        for value in [
+            "gui --background --background",
+            "gui --background true",
+            "server --background",
+            "client --server 127.0.0.1:24920 --background",
+        ] {
+            assert!(parse_args(&args(value)).is_err(), "{value}");
+        }
     }
     #[test]
     fn image_clipboard_option_accepts_on_off_and_rejects_other_values() {

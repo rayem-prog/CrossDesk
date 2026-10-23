@@ -528,3 +528,58 @@ fn text_option_requires_disconnect_and_persists_independently() {
     assert!(!restored.file_clipboard);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+// A backend that deliberately retains a report after disconnection lets this
+// test catch accidental exposure of reports from an earlier connection.
+struct DiagnosticService(Arc<Mutex<crate::diagnostics::DiagnosticView>>);
+impl ServiceControl for DiagnosticService {
+    fn start(&mut self, _: &AppConfig, _: &Path, _: bool, _: bool, _: bool) -> io::Result<()> {
+        Ok(())
+    }
+    fn stop(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+    fn poll(&mut self) -> (ServiceState, Option<String>) {
+        (ServiceState::Connected, None)
+    }
+    fn logs(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn diagnostics(&self) -> crate::diagnostics::DiagnosticView {
+        self.0.lock().unwrap().clone()
+    }
+    fn start_diagnostics(&mut self) -> io::Result<()> {
+        *self.0.lock().unwrap() = crate::diagnostics::DiagnosticView {
+            run_id: Some(42),
+            state: crate::diagnostics::DiagnosticState::Collecting,
+            remaining_seconds: 60,
+            report: None,
+        };
+        Ok(())
+    }
+    fn stop_diagnostics(&mut self) -> io::Result<()> {
+        self.0.lock().unwrap().state = crate::diagnostics::DiagnosticState::Stopped;
+        Ok(())
+    }
+}
+#[test]
+fn diagnostic_commands_preserve_connection_and_disconnected_views_hide_old_reports() {
+    use crate::diagnostics::{DiagnosticState, DiagnosticView};
+    let mut nonce = [0; 8];
+    getrandom::getrandom(&mut nonce).unwrap();
+    let root = std::env::temp_dir().join(format!("crossdesk-diagnostics-core-{nonce:x?}"));
+    let store = Arc::new(TrustedStore::new(root.clone()).unwrap());
+    let slot = Arc::new(Mutex::new(DiagnosticView::default()));
+    let mut core = Core::from_parts("macos", store, Box::new(DiagnosticService(slot))).unwrap();
+    assert!(core.command(Command::DiagnosticsStart).is_err());
+    core.tick().unwrap();
+    core.command(Command::DiagnosticsStart).unwrap();
+    assert_eq!(core.view().state, "connected");
+    assert_eq!(core.view().diagnostics.run_id, Some(42));
+    core.command(Command::DiagnosticsStop).unwrap();
+    assert_eq!(core.view().diagnostics.state, DiagnosticState::Stopped);
+    core.disconnect().unwrap();
+    assert_eq!(core.view().diagnostics, DiagnosticView::default());
+    core.shutdown();
+    std::fs::remove_dir_all(root).unwrap();
+}

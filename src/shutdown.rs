@@ -49,6 +49,58 @@ impl Drop for TransportStopGuard {
 pub fn install_signal_handler() -> std::io::Result<()> {
     ctrlc::set_handler(request_shutdown).map_err(std::io::Error::other)
 }
+#[derive(Debug, PartialEq, Eq)]
+enum GuiCommand {
+    Stop,
+    DiagnosticsStart(u64),
+    DiagnosticsStop,
+    Ignore,
+}
+fn parse_gui_command(line: &str) -> GuiCommand {
+    if line.len() > 128 {
+        return GuiCommand::Ignore;
+    }
+    if line.trim().eq_ignore_ascii_case("stop") {
+        return GuiCommand::Stop;
+    }
+    let fields: Vec<_> = line.split_whitespace().collect();
+    match fields.as_slice() {
+        ["diagnostics", "stop"] => GuiCommand::DiagnosticsStop,
+        ["diagnostics", "start", id] if id.bytes().all(|c| c.is_ascii_digit()) => id
+            .parse::<u64>()
+            .ok()
+            .filter(|&n| n != 0)
+            .map(GuiCommand::DiagnosticsStart)
+            .unwrap_or(GuiCommand::Ignore),
+        _ => GuiCommand::Ignore,
+    }
+}
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+    #[test]
+    fn commands_keep_shutdown_distinct_and_accept_only_valid_diagnostic_ids() {
+        assert_eq!(parse_gui_command(" STOP "), GuiCommand::Stop);
+        assert_eq!(
+            parse_gui_command("diagnostics start 42"),
+            GuiCommand::DiagnosticsStart(42)
+        );
+        assert_eq!(
+            parse_gui_command("diagnostics stop"),
+            GuiCommand::DiagnosticsStop
+        );
+        for s in [
+            "diagnostics start 0",
+            "diagnostics start -1",
+            "diagnostics start 18446744073709551616",
+            "diagnostics stop extra",
+            "diagnostics start 1 extra",
+            "unrecognized",
+        ] {
+            assert_eq!(parse_gui_command(s), GuiCommand::Ignore, "{s}");
+        }
+    }
+}
 pub fn spawn_gui_stop_watcher() {
     if std::env::var_os("DESKBRIDGE_GUI_CHILD").is_none() {
         return;
@@ -56,10 +108,15 @@ pub fn spawn_gui_stop_watcher() {
     thread::spawn(|| {
         let stdin = std::io::stdin();
         for line in stdin.lock().lines() {
-            match line {
-                Ok(s) if s.trim().eq_ignore_ascii_case("stop") => break,
-                Err(_) => break,
-                _ => continue,
+            match line.map(|s| parse_gui_command(&s)) {
+                Ok(GuiCommand::Stop) | Err(_) => break,
+                Ok(GuiCommand::DiagnosticsStart(id)) => {
+                    if let Err(error) = crate::diagnostics::start(id) {
+                        eprintln!("diagnostics: {error}");
+                    }
+                }
+                Ok(GuiCommand::DiagnosticsStop) => crate::diagnostics::stop(),
+                Ok(GuiCommand::Ignore) => {}
             }
         }
         request_shutdown();

@@ -156,6 +156,7 @@ fn run_session(
     texts_enabled: bool,
 ) -> std::io::Result<()> {
     let _transport = crate::shutdown::register_transport(&stream)?;
+    let _diagnostic_session = crate::diagnostics::begin_session();
     let stop_stream = stream.try_clone()?;
     let remote_profile = ConnectionProfile::local_server(client_platform);
     eprintln!(

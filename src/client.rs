@@ -174,6 +174,7 @@ fn run_session(server: &str, key: &[u8; 32]) -> std::io::Result<()> {
     );
     // Drop input before clipboard teardown can wait for an outstanding disk/network operation.
     let input = input;
+    let _diagnostic_session = crate::diagnostics::begin_session();
     let mut input_log = InputLog::new();
     crate::service_event::emit(crate::service_event::ServiceState::Connected, None);
 

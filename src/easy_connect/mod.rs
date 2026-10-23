@@ -54,6 +54,7 @@ pub struct ConnectView {
     pub logs: Vec<String>,
     pub app_version: String,
     pub transfer: Option<crate::service_event::TransferEvent>,
+    pub diagnostics: crate::diagnostics::DiagnosticView,
 }
 impl ConnectView {
     pub fn loading() -> Self {
@@ -73,11 +74,21 @@ impl ConnectView {
             busy: false,
             logs: Vec::new(),
             transfer: None,
+            diagnostics: Default::default(),
             app_version: env!("CARGO_PKG_VERSION").into(),
         }
     }
 }
 pub trait ServiceControl: Send {
+    fn diagnostics(&self) -> crate::diagnostics::DiagnosticView {
+        Default::default()
+    }
+    fn start_diagnostics(&mut self) -> io::Result<()> {
+        Err(io::Error::other("此服务不支持诊断"))
+    }
+    fn stop_diagnostics(&mut self) -> io::Result<()> {
+        Ok(())
+    }
     fn start(
         &mut self,
         config: &AppConfig,
@@ -97,6 +108,15 @@ pub trait ServiceControl: Send {
     }
 }
 impl ServiceControl for ProcessBackend {
+    fn diagnostics(&self) -> crate::diagnostics::DiagnosticView {
+        ProcessBackend::diagnostics(self)
+    }
+    fn start_diagnostics(&mut self) -> io::Result<()> {
+        ProcessBackend::start_diagnostics(self)
+    }
+    fn stop_diagnostics(&mut self) -> io::Result<()> {
+        ProcessBackend::stop_diagnostics(self)
+    }
     fn capabilities(&self) -> Option<crate::service_event::ClipboardCapabilities> {
         self.clipboard_capabilities()
     }
@@ -123,6 +143,8 @@ pub enum Command {
     Pair(String),
     Connect,
     Disconnect,
+    DiagnosticsStart,
+    DiagnosticsStop,
     Refresh,
     Forget,
     Options {
@@ -467,6 +489,9 @@ impl Core {
         view.busy = self.job.is_some();
         view.logs = self.backend.logs();
         view.transfer = self.backend.transfer();
+        if self.phase == ServiceState::Connected {
+            view.diagnostics = self.backend.diagnostics();
+        }
         let pair_view = self.pairing.as_ref().map(PairingService::view);
         if let Some(p) = pair_view {
             view.pairing_code = p.code;
@@ -586,6 +611,13 @@ impl Core {
             }
             Command::Connect => self.connect()?,
             Command::Disconnect => self.disconnect()?,
+            Command::DiagnosticsStart => {
+                if self.phase != ServiceState::Connected {
+                    return Err(io::Error::other("请先连接设备"));
+                }
+                self.backend.start_diagnostics()?;
+            }
+            Command::DiagnosticsStop => self.backend.stop_diagnostics()?,
             Command::Refresh => {
                 self.error = None;
                 self.discovery.take();
