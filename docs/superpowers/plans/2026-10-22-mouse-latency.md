@@ -33,7 +33,7 @@ Files: new `src/input/pacing.rs`, `src/input/wait_windows.rs`; source sender sec
 
 - [x] First write deterministic deadline tests showing first motion is immediate, continuous motion bounded by deadlines, nonmergeable motion/control boundaries flush in order, and close does not replay pending events.
 - [x] Replace unbounded sender with EventQueue and an interruptible event/timer wait; native hook only pushes and signals.
-- [x] Use CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, fall back to a normal timer, close every handle; add native wait/notification regressions for disposable Windows CI (execution pending delivery).
+- [x] Use CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, fall back to a normal timer, close every handle; verify native wait/notification in disposable Windows CI (all three tests passed).
 - [x] Cross-compile with tests and retain all pointer/input regressions.
 
 ## Task 3: Fixed-memory timing statistics (metrics agent)
@@ -48,5 +48,13 @@ File: new `src/input/latency.rs` only; root registers module. API and call sites
 
 - [x] Run Rust GUI/CLI, receiver/queue/pacing/metrics tests, web regression, formatting and Windows test cross-check.
 - [x] Bump own versions to 0.6.1 (keep spake2 0.4.0 and protocol 7), document metrics and timing limits.
-- [ ] Push branch based on c7f1f3b, create draft PR based on codex/text-clipboard, attach PR and run native CI.
-- [ ] Build Mac app and download Windows installer with matching source packages; record checks actually passed and deliver without physical acceptance.
+- [x] Push branch based on c7f1f3b, create draft PR based on codex/text-clipboard, attach PR and run native CI.
+- [x] Build Mac app and download Windows installer with matching source packages; record checks actually passed and deliver without physical acceptance.
+
+## Delivery evidence — 2026-10-23
+
+Implementation commit: `189eed8a6371f31f9cf447edc763ef4ce572c689`. Draft PR: https://github.com/rayem-prog/CrossDesk/pull/5.
+
+Native GUI run 39804507114 succeeded on both platforms: Windows 175 ordinary tests passed / 4 ignored, Mac 189 passed / 3 ignored. Explicit native Windows clipboard and release-mode 129 MiB transfer checks passed, including all three native timer tests. Both PR CLI jobs (run 39804507180) and duplicate push CLI jobs (run 39804398598) succeeded.
+
+Mac ARM64 app and Windows x64 NSIS installer were built and packaged with corresponding sources and dependency notices. Downloaded Windows source files were compared with the implementation checkout; CI records synthetic merge source `6e0180e8256fa9c0566f4e0986c0f3448eccad2c`, while the local Mac source is the implementation commit. ZIP checksums and version 0.6.1 were verified. Delivery remains a test build and draft PR, without a formal release, physical two-device acceptance or automatic replacement of the running app.
