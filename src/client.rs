@@ -9,12 +9,94 @@ use crate::clipboard::session::ClipboardSession;
 use crate::clipboard::{Clipboard, ClipboardApi};
 use crate::file_transfer;
 use crate::input::InputSink;
+use crate::input::latency::{LatencyStats, Stage};
+use crate::input::queue::EventQueue;
 use crate::platform::{ConnectionProfile, Platform};
 use crate::protocol::{self, ClipboardPayload, Frame, FrameKind, InputEvent};
 use crate::transport::SharedWriter;
 
 const REMOTE_CLIPBOARD_SUPPRESS_WINDOW: Duration = Duration::from_millis(1200);
 const DEFAULT_INPUT_FLUSH_MS: u64 = 4;
+
+fn apply_input_queue(queue: &EventQueue, mut apply: impl FnMut(InputEvent) -> std::io::Result<()>) {
+    let mut stats = LatencyStats::from_env("receive");
+    while let Some(item) = queue.recv() {
+        if stats.enabled() {
+            stats.record(Stage::ReceiveQueue, item.enqueued.elapsed());
+            stats.queue(queue.take_peak_depth(), item.samples);
+        }
+        let started = stats.enabled().then(Instant::now);
+        if let Err(error) = apply(item.event) {
+            eprintln!("input apply failed: {error}");
+        }
+        if let Some(started) = started {
+            stats.record(Stage::Inject, started.elapsed());
+        }
+        if let Some(report) = stats.maybe_report() {
+            eprintln!("{report}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod input_queue_tests {
+    use super::*;
+    use crate::protocol::MouseButton;
+    #[test]
+    fn receiver_applies_queued_motion_once_before_the_click_without_new_waits() {
+        let queue = EventQueue::new(256);
+        queue.push(InputEvent::MouseEnter { x: 10, y: 10 }).unwrap();
+        for _ in 0..8000 {
+            queue.push(InputEvent::MouseDelta { dx: 1, dy: 1 }).unwrap();
+        }
+        queue
+            .push(InputEvent::MouseButton {
+                button: MouseButton::Left,
+                down: true,
+            })
+            .unwrap();
+        queue
+            .push(InputEvent::MouseDelta { dx: -3, dy: 0 })
+            .unwrap();
+        queue
+            .push(InputEvent::MouseButton {
+                button: MouseButton::Left,
+                down: false,
+            })
+            .unwrap();
+        let mut actual = Vec::new();
+        apply_input_queue(&queue, |event| {
+            actual.push(event);
+            if actual.len() == 5 {
+                queue.close();
+            }
+            Ok(())
+        });
+        assert_eq!(
+            actual,
+            vec![
+                InputEvent::MouseEnter { x: 10, y: 10 },
+                InputEvent::MouseDelta { dx: 8000, dy: 8000 },
+                InputEvent::MouseButton {
+                    button: MouseButton::Left,
+                    down: true
+                },
+                InputEvent::MouseDelta { dx: -3, dy: 0 },
+                InputEvent::MouseButton {
+                    button: MouseButton::Left,
+                    down: false
+                }
+            ]
+        );
+    }
+    #[test]
+    fn receiver_close_discards_old_motion_and_does_not_apply_it_again() {
+        let queue = EventQueue::new(256);
+        queue.push(InputEvent::MouseDelta { dx: 4, dy: 2 }).unwrap();
+        queue.close();
+        apply_input_queue(&queue, |_| panic!("replayed input after close"));
+    }
+}
 
 pub fn run(server: &str) -> std::io::Result<()> {
     let key = crate::secure::load_key()?;
@@ -90,6 +172,8 @@ fn run_session(server: &str, key: &[u8; 32]) -> std::io::Result<()> {
     crate::service_event::capabilities(
         crate::transport::text_clipboard_enabled() && server_hello.text_clipboard,
     );
+    // Drop input before clipboard teardown can wait for an outstanding disk/network operation.
+    let input = input;
     let mut input_log = InputLog::new();
     crate::service_event::emit(crate::service_event::ServiceState::Connected, None);
 
@@ -123,7 +207,7 @@ fn run_session(server: &str, key: &[u8; 32]) -> std::io::Result<()> {
             FrameKind::Input => {
                 let event = protocol::decode_input(&frame.payload)?;
                 input_log.observe(&event);
-                input.send(event);
+                input.send(event)?;
             }
             FrameKind::FileStart => {
                 let (relative, len) = protocol::decode_file_start(&frame.payload)?;
@@ -147,50 +231,55 @@ fn run_session(server: &str, key: &[u8; 32]) -> std::io::Result<()> {
     }
 }
 
-// The server already coalesces motion. Keeping every event in one ordered
-// queue prevents a later motion from jumping ahead of a mouse-down/up.
+// Coalesce only already-queued monotonic motion; native controls retain their order.
 struct InputApplier {
-    sender: Option<mpsc::SyncSender<InputEvent>>,
+    queue: Arc<EventQueue>,
     worker: Option<thread::JoinHandle<()>>,
 }
 impl InputApplier {
     fn spawn(profile: ConnectionProfile) -> std::io::Result<(Self, (u32, u32))> {
-        let (sender, receiver) = mpsc::sync_channel(256);
+        let queue = Arc::new(EventQueue::new(256));
+        let target = queue.clone();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
-        let worker = thread::spawn(move || match InputSink::new(profile) {
-            Ok(mut input) => {
-                let _ = ready_tx.send(Ok(input.screen_size()));
-                for event in receiver {
-                    if let Err(error) = input.apply(event) {
-                        eprintln!("input apply failed: {error}");
-                    }
+        let worker = thread::Builder::new()
+            .name("input-apply".into())
+            .spawn(move || match InputSink::new(profile) {
+                Ok(mut input) => {
+                    let _ = ready_tx.send(Ok(input.screen_size()));
+                    apply_input_queue(&target, |event| input.apply(event));
+                    // Dropping InputSink releases all remotely pressed keys/buttons.
                 }
-                // Dropping InputSink releases all remotely pressed keys/buttons.
-            }
+                Err(error) => {
+                    let _ = ready_tx.send(Err(error));
+                }
+            })?;
+        let size = match ready_rx
+            .recv()
+            .map_err(std::io::Error::other)
+            .and_then(|result| result)
+        {
+            Ok(size) => size,
             Err(error) => {
-                let _ = ready_tx.send(Err(error));
+                queue.close();
+                let _ = worker.join();
+                return Err(error);
             }
-        });
-        let size = ready_rx.recv().map_err(std::io::Error::other)??;
+        };
         Ok((
             Self {
-                sender: Some(sender),
+                queue,
                 worker: Some(worker),
             },
             size,
         ))
     }
-    fn send(&self, event: InputEvent) {
-        if let Some(sender) = &self.sender {
-            if let Err(error) = sender.send(event) {
-                eprintln!("input queue closed: {error}");
-            }
-        }
+    fn send(&self, event: InputEvent) -> std::io::Result<()> {
+        self.queue.push(event)
     }
 }
 impl Drop for InputApplier {
     fn drop(&mut self) {
-        self.sender.take();
+        self.queue.close();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }

@@ -1,3 +1,35 @@
+# CrossDesk 0.6.1 validation — 2026-10-22
+
+## Mouse pipeline implementation and regression scope
+
+Protocol remains v7; pairing and text/image/file clipboard compatibility are preserved. The Windows sender immediately sends the first movement after idle, then paces continuous movement at the existing default 2 ms interval using an interruptible high-resolution waitable timer with ordinary-timer fallback. The hook does not wait for networking or timers, and the sender does not busy-spin.
+
+Both endpoints use a 256-record bounded input queue. Only adjacent relative movements whose individual axes do not reverse can coalesce, using checked coordinate addition while retaining the earliest enqueue instant and original sample count. Reversals, coordinate overflow, key/button/wheel events and enter/leave events form boundaries. Receiver coalescing only consumes an existing backlog; it adds no receive wait. Capacity exhaustion when coalescing is impossible terminates the session and releases input. Stop clears pending entries and wakes consumers, preventing stale replay after disconnect. macOS retains the CGEvent injection path.
+
+Regression checks target ordered event boundaries, displacement and edge-clamping equivalence, overflow and stop behavior, immediate first movement, pacing deadlines and timer fallback. Metrics tests use deterministic timestamps and hand-checked percentile ranks, covering five-second throttling, reset, disabled mode and overflow durations. Final command results and counts are recorded below by the delivery build.
+
+Optional `CROSSDESK_INPUT_METRICS=1` enables fixed-memory histograms for send queue, network write, receive queue, injection and pacing lateness. Reports are aggregated at most every five seconds with count, p50/p95/p99, maximum, coalesced sample count and queue high-water depth. Percentiles use microsecond bucket upper bounds, with the actual maximum for the overflow bucket. These measurements are application pipeline stages, not screen end-to-end latency; logs contain no input coordinates, key values, text bodies or keys. No new UI, protocol or RTT messages are introduced.
+
+## Local verification for 0.6.1
+
+- `cargo test --locked --features gui`: **189 passed, 3 ignored**.
+- `cargo test --locked --no-default-features`: **149 passed, 2 ignored**.
+- `cargo check --locked --no-default-features --tests --target x86_64-pc-windows-gnu`: passed; the existing `tree_cache.rs` unused-mut warning remains.
+- Web: **25 passed** and Vite production build passed. Source-packaging regression: **1 passed**.
+- `cargo fmt --check` and `git diff --check`: passed.
+- New queue, pacing, histogram and Mac arithmetic regressions were observed failing before their implementations, then passing. Receiver tests apply only fake inputs. Windows timer execution and native package build results are recorded separately with delivery artifacts.
+- Final bounded review covered timer wakeups, hook failure handling, receiver teardown order and queue high-water accounting; no outstanding correctness issue was reported.
+
+## Verification limits and existing baseline failure
+
+This work does not post native input or intentionally modify the user's general clipboard during local tests. No live CrossDesk instance is replaced or restarted. No additional physical two-device acceptance is performed for this iteration, and no numeric or perceived smoothness improvement is claimed before the user tries the packages.
+
+The CLI 129 MiB encrypted-transfer check has an existing failure reproduced against the final 0.6.0 source. That pre-existing failure is retained as a known limitation rather than attributed to this mouse change; final verification records identify any current recurrence. Historical 0.6.0 evidence below is preserved as originally recorded and does not establish a fresh pass for 0.6.1.
+
+---
+
+## Prior 0.6.0 baseline
+
 # CrossDesk 0.6.0 validation — 2026-10-22
 
 ## Current implementation and verification

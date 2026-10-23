@@ -1,9 +1,14 @@
+pub(crate) mod latency;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+pub(crate) mod pacing;
+pub mod queue;
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod unsupported;
+#[cfg(windows)]
+pub(crate) mod wait_windows;
 #[cfg(windows)]
 mod windows;
 

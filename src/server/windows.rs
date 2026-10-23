@@ -9,7 +9,6 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -46,6 +45,10 @@ use super::{Edge, ServerConfig};
 use crate::clipboard::session::ClipboardSession;
 use crate::clipboard::{Clipboard, ClipboardApi};
 use crate::file_transfer;
+use crate::input::latency::{LatencyStats, Stage};
+use crate::input::pacing::Pacer;
+use crate::input::queue::{EventQueue, TimedInput};
+use crate::input::wait_windows::{InputWait, WinWakeEvent};
 use crate::platform::{ConnectionProfile, Platform};
 use crate::pointer::{MotionAction, PointerRouter};
 use crate::protocol::{
@@ -57,7 +60,6 @@ const DEFAULT_REMOTE_WIDTH: i32 = 1366;
 const DEFAULT_REMOTE_HEIGHT: i32 = 768;
 const WHEEL_PIXELS_PER_DETENT: i32 = 120;
 const DEFAULT_INPUT_FLUSH_MS: u64 = 2;
-const INPUT_BATCH_LIMIT: usize = 64;
 const DROP_STRIP_WIDTH: i32 = 18;
 const DROP_STRIP_ALPHA: u8 = 48;
 const CURSOR_LOCK_RADIUS: i32 = 24;
@@ -169,7 +171,7 @@ fn run_session(
     );
 
     let clipboard_state = Arc::new(Mutex::new(ClipboardSyncState::default()));
-    let input = InputEmitter::spawn(writer.clone());
+    let input = InputEmitter::spawn(writer.clone())?;
     let state = CaptureState::new(input, config.edge, remote_size);
     if let Some(existing) = CAPTURE_STATE.get() {
         *existing.lock().unwrap() = state;
@@ -1057,29 +1059,39 @@ impl CaptureState {
 }
 
 struct InputEmitter {
-    sender: Option<Sender<InputEvent>>,
+    queue: Arc<EventQueue>,
+    wake: Arc<WinWakeEvent>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
 impl InputEmitter {
-    fn spawn(writer: SharedWriter) -> Self {
-        let (sender, receiver) = mpsc::channel();
-        let worker = thread::spawn(move || input_writer_loop(writer, receiver));
-        Self {
-            sender: Some(sender),
+    fn spawn(writer: SharedWriter) -> std::io::Result<Self> {
+        let queue = Arc::new(EventQueue::new(256));
+        let wake = Arc::new(WinWakeEvent::new()?);
+        let timer = InputWait::new()?;
+        let worker_queue = queue.clone();
+        let worker_wake = wake.clone();
+        let worker =
+            thread::spawn(move || input_writer_loop(writer, worker_queue, worker_wake, timer));
+        Ok(Self {
+            queue,
+            wake,
             worker: Some(worker),
-        }
+        })
     }
 
     fn send(&self, event: InputEvent) {
-        if let Some(sender) = &self.sender {
-            if let Err(e) = sender.send(event) {
-                eprintln!("input queue closed: {e}");
-            }
+        if let Err(error) = self.queue.push(event).and_then(|()| self.wake.signal()) {
+            eprintln!("input queue stopped: {error}");
+            self.queue.close();
+            let _ = self.wake.signal();
+            // This runs inside the capture lock: only atomic state and PostMessage.
+            connection_lost();
         }
     }
     fn stop(&mut self) {
-        self.sender.take();
+        self.queue.close();
+        let _ = self.wake.signal();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -1091,140 +1103,75 @@ impl Drop for InputEmitter {
     }
 }
 
-fn input_writer_loop(writer: SharedWriter, receiver: Receiver<InputEvent>) {
-    let mut pending_delta = (0i32, 0i32);
-    let mut pending_wheel = (0i32, 0i32);
-    let mut pending_since = None;
+fn input_writer_loop(
+    writer: SharedWriter,
+    queue: Arc<EventQueue>,
+    wake: Arc<WinWakeEvent>,
+    timer: InputWait,
+) {
+    let mut pacer = Pacer::new(input_flush_interval());
     let mut log = InputSendLog::new();
-
+    let mut metrics = LatencyStats::from_env("send");
     loop {
-        let event = match recv_input_event(&receiver, pending_since) {
-            Ok(Some(event)) => event,
-            Ok(None) => {
-                flush_pending_input(
-                    &writer,
-                    &mut pending_delta,
-                    &mut pending_wheel,
-                    &mut pending_since,
-                    &mut log,
-                );
-                continue;
-            }
-            Err(()) => break,
-        };
-
-        match event {
-            event @ (InputEvent::MouseDelta { .. } | InputEvent::MouseWheel { .. }) => {
-                queue_pending_input(
-                    event,
-                    &mut pending_delta,
-                    &mut pending_wheel,
-                    &mut pending_since,
-                );
-                drain_queued_input(
-                    &writer,
-                    &receiver,
-                    &mut pending_delta,
-                    &mut pending_wheel,
-                    &mut pending_since,
-                    &mut log,
-                );
-            }
-            event => {
-                flush_pending_input(
-                    &writer,
-                    &mut pending_delta,
-                    &mut pending_wheel,
-                    &mut pending_since,
-                    &mut log,
-                );
-                write_input_event(&writer, event, &mut log);
+        if queue.is_closed() {
+            break;
+        }
+        let now = Instant::now();
+        if let Some(deadline) = pacer.deadline().filter(|deadline| now >= *deadline) {
+            metrics.record(Stage::PacingLate, now.saturating_duration_since(deadline));
+        }
+        if let Some(item) = pacer.due(now) {
+            if !write_timed_input(&writer, &queue, item, &mut log, &mut metrics) {
+                break;
             }
         }
-    }
-}
-
-fn recv_input_event(
-    receiver: &Receiver<InputEvent>,
-    pending_since: Option<Instant>,
-) -> Result<Option<InputEvent>, ()> {
-    match pending_since {
-        Some(_) => match receiver.recv_timeout(input_flush_timeout(pending_since)) {
-            Ok(event) => Ok(Some(event)),
-            Err(RecvTimeoutError::Timeout) => Ok(None),
-            Err(RecvTimeoutError::Disconnected) => Err(()),
-        },
-        None => receiver.recv().map(Some).map_err(|_| ()),
-    }
-}
-
-fn queue_pending_input(
-    event: InputEvent,
-    pending_delta: &mut (i32, i32),
-    pending_wheel: &mut (i32, i32),
-    pending_since: &mut Option<Instant>,
-) {
-    if pending_since.is_none() {
-        *pending_since = Some(Instant::now());
-    }
-    match event {
-        InputEvent::MouseDelta { dx, dy } => {
-            pending_delta.0 = pending_delta.0.saturating_add(dx);
-            pending_delta.1 = pending_delta.1.saturating_add(dy);
+        if let Some(item) = queue.try_pop() {
+            if metrics.enabled() {
+                metrics.queue(queue.take_peak_depth(), 1);
+            }
+            for item in pacer.push(item, Instant::now()).into_iter().flatten() {
+                if !write_timed_input(&writer, &queue, item, &mut log, &mut metrics) {
+                    pacer.clear();
+                    return;
+                }
+            }
+            continue;
         }
-        InputEvent::MouseWheel {
-            horizontal,
-            vertical,
-        } => {
-            pending_wheel.0 = pending_wheel.0.saturating_add(horizontal as i32);
-            pending_wheel.1 = pending_wheel.1.saturating_add(vertical as i32);
+        if queue.is_closed() {
+            break;
         }
-        _ => {}
+        if let Err(error) = timer.wait(&wake, pacer.deadline()) {
+            eprintln!("input timer failed: {error}");
+            queue.close();
+            connection_lost();
+            break;
+        }
     }
+    pacer.clear();
 }
 
-fn drain_queued_input(
+fn write_timed_input(
     writer: &SharedWriter,
-    receiver: &Receiver<InputEvent>,
-    pending_delta: &mut (i32, i32),
-    pending_wheel: &mut (i32, i32),
-    pending_since: &mut Option<Instant>,
+    queue: &EventQueue,
+    item: TimedInput,
     log: &mut InputSendLog,
-) {
-    for _ in 0..INPUT_BATCH_LIMIT {
-        match receiver.try_recv() {
-            Ok(event @ (InputEvent::MouseDelta { .. } | InputEvent::MouseWheel { .. })) => {
-                queue_pending_input(event, pending_delta, pending_wheel, pending_since);
-            }
-            Ok(event) => {
-                flush_pending_input(writer, pending_delta, pending_wheel, pending_since, log);
-                write_input_event(writer, event, log);
-                return;
-            }
-            Err(TryRecvError::Empty) => break,
-            Err(TryRecvError::Disconnected) => return,
-        }
+    metrics: &mut LatencyStats,
+) -> bool {
+    if queue.is_closed() || !CONNECTION_ALIVE.load(Ordering::Acquire) {
+        return false;
     }
-
-    if pending_ready(*pending_since) {
-        flush_pending_input(writer, pending_delta, pending_wheel, pending_since, log);
+    if metrics.enabled() {
+        metrics.record(Stage::SendQueue, item.enqueued.elapsed());
     }
-}
-
-fn input_flush_timeout(pending_since: Option<Instant>) -> Duration {
-    pending_since
-        .map(|since| {
-            input_flush_interval()
-                .checked_sub(since.elapsed())
-                .unwrap_or(Duration::ZERO)
-        })
-        .unwrap_or_else(input_flush_interval)
-}
-
-fn pending_ready(pending_since: Option<Instant>) -> bool {
-    pending_since
-        .map(|since| since.elapsed() >= input_flush_interval())
-        .unwrap_or(false)
+    metrics.queue(0, item.samples);
+    let sent = write_input_event(writer, item.event, log, metrics);
+    if let Some(report) = metrics.maybe_report() {
+        eprintln!("{report}");
+    }
+    if !sent {
+        queue.close();
+    }
+    sent
 }
 
 fn input_flush_interval() -> Duration {
@@ -1237,38 +1184,6 @@ fn input_flush_interval() -> Duration {
             .clamp(1, 16);
         Duration::from_millis(ms)
     })
-}
-
-fn flush_pending_input(
-    writer: &SharedWriter,
-    pending_delta: &mut (i32, i32),
-    pending_wheel: &mut (i32, i32),
-    pending_since: &mut Option<Instant>,
-    log: &mut InputSendLog,
-) {
-    if pending_delta.0 != 0 || pending_delta.1 != 0 {
-        write_input_event(
-            writer,
-            InputEvent::MouseDelta {
-                dx: pending_delta.0,
-                dy: pending_delta.1,
-            },
-            log,
-        );
-        *pending_delta = (0, 0);
-    }
-    if pending_wheel.0 != 0 || pending_wheel.1 != 0 {
-        write_input_event(
-            writer,
-            InputEvent::MouseWheel {
-                horizontal: clamp(pending_wheel.0, i16::MIN as i32, i16::MAX as i32) as i16,
-                vertical: clamp(pending_wheel.1, i16::MIN as i32, i16::MAX as i32) as i16,
-            },
-            log,
-        );
-        *pending_wheel = (0, 0);
-    }
-    *pending_since = None;
 }
 
 struct InputSendLog {
@@ -1296,21 +1211,32 @@ impl InputSendLog {
     }
 }
 
-fn write_input_event(writer: &SharedWriter, event: InputEvent, log: &mut InputSendLog) {
-    let encoded = protocol::encode_input(&event);
-    if let Err(e) = writer.write(Frame::new(FrameKind::Input, encoded)) {
+fn write_input_event(
+    writer: &SharedWriter,
+    event: InputEvent,
+    log: &mut InputSendLog,
+    metrics: &mut LatencyStats,
+) -> bool {
+    let frame = Frame::new(FrameKind::Input, protocol::encode_input(&event));
+    let started = metrics.enabled().then(Instant::now);
+    let result = writer.write(frame);
+    if let Some(started) = started {
+        metrics.record(Stage::SendWrite, started.elapsed());
+    }
+    if let Err(e) = result {
         eprintln!("input send failed after {} sent event(s): {e}", log.count);
         connection_lost();
-        return;
+        return false;
     }
     log.count += 1;
     if !log.enabled {
-        return;
+        return true;
     }
     if log.count == 1 || log.last_print.elapsed() >= Duration::from_secs(1) {
         eprintln!("sent input event #{}: {:?}", log.count, event);
         log.last_print = Instant::now();
     }
+    true
 }
 
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
