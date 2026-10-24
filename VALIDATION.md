@@ -8,7 +8,7 @@ Native source paths come only from Tauri drag/drop. Destination selection stays 
 
 ## Automated checks and limits
 
-- Final local GUI Rust: **253 passed / 5 ignored**; CLI Rust: **188 passed / 3 ignored**. Web: **44 passed**, production build passed; corresponding-source package regression: **1 passed**. Ignored comparison and large-streaming checks are selected separately; native Windows clipboard checks run only on CI.
+- Final local GUI Rust: **254 passed / 5 ignored**; CLI Rust: **189 passed / 3 ignored**. Web: **44 passed**, production build passed; corresponding-source package regression: **1 passed**. Ignored comparison and large-streaming checks are selected separately; native Windows clipboard checks run only on CI.
 - The release loopback comparison passed. Native CI and explicit large-streaming results are recorded in delivery evidence.
 - Engine regressions include consent before content, source mutation after offer, bounded ACK backpressure, simultaneous encrypted tree transfers, rejected/busy requests, source/destination limits, checksum cleanup, exclusive collision, offer/receive expiry, and disconnect cleanup/join.
 - Local IPC tests use an isolated child process to preserve Chinese, quotes and embedded newlines without injecting commands; malformed/oversized events are consumed rather than logged. Disconnect clears stale state.
@@ -17,7 +17,15 @@ Native source paths come only from Tauri drag/drop. Destination selection stays 
 - The opt-in release loopback comparison sends 2,000 ordered input frames in each mode. A separate lane is proven stalled by an actual socket write timeout after queueing524,288bytes. Idle versus stalled lane primary-write p95 was14/15microseconds, roundtrip p95 was115/77microseconds in this sample. This is a controlled network-stage observation, not OS input injection, LAN/Wi-Fi performance or screen end-to-end latency; it does not establish a universal perceived improvement.
 - Browser previews verify native-sized card layout and visible accept/progress/cancel controls through a DEV-only native-boundary fixture. They do not replace real Finder/Explorer drag acceptance or physical two-device testing. No installed app is replaced/restarted and no login item is changed.
 
-Delivery requires native Mac/Windows automated builds and source-inclusive test packages plus a draft PR, without a physical acceptance gate or formal release.
+## Delivery record
+
+The application implementation is commit `64c17dcf926c5311147c87683b3b19eaae562d50`. [Native GUI automation](https://github.com/rayem-prog/CrossDesk/actions/runs/40057223441) passed on both platforms: Mac 253 passed / 5 ignored, Windows 240 passed / 7 ignored, with each release 129 MiB streaming check selected and passing. Windows native clipboard and edge-drop clipboard-preservation checks also passed on the disposable runner. [Same-source CLI automation](https://github.com/rayem-prog/CrossDesk/actions/runs/40057074010) passed on both platforms, including the explicit large-stream check (Mac 188 / 3 ignored, Windows 176 / 5 ignored).
+
+A separate PR CLI run exposed an intermittent legacy file-only test-helper failure. A controlled 5.25-second FileSeal-credit delay reproduced its exact Interrupted result: the helper's reader hit the unchanged five-second transport deadline, then dropped the file session. That helper omitted the outer connection heartbeat and swallowed the original read error. A test-only follow-up adds independent marked heartbeats, joined shutdown and typed reader diagnostics. The same delayed-credit regression then completes and verifies its file, without changing production timeouts, credit deadlines or application behavior. The precise original CI delay source was not established; it is not attributed to a production defect.
+
+Mac ARM64 and Windows x64 source-inclusive GUI test packages record implementation commit `64c17dc`. ZIP CRC, SHA-256, 114 application-source comparisons, private-data exclusion and native headers passed. The Mac app's ad-hoc signature and version were verified after extraction. The Windows NSIS installer was produced by native CI. Complete dependency source/notices and corresponding application source are included in each ZIP; the test-helper-only follow-up is available in [draft PR #7](https://github.com/rayem-prog/CrossDesk/pull/7), stacked on `codex/background-diagnostics`.
+
+The packages are test builds, without a physical acceptance gate or formal release. Exit the old app before opening 0.7.0 because single-instance startup otherwise restores the running older window. Existing pairing and preferences remain usable. No installed live app was replaced or restarted.
 
 ---
 
