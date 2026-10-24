@@ -46,21 +46,62 @@ fn create_file(path: &Path) -> io::Result<File> {
     }
     options.open(path)
 }
+pub(crate) fn set_hidden(path: &Path, hidden: bool) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_HIDDEN, GetFileAttributesW, INVALID_FILE_ATTRIBUTES, SetFileAttributesW,
+        };
+        let p: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let attrs = unsafe { GetFileAttributesW(p.as_ptr()) };
+        if attrs == INVALID_FILE_ATTRIBUTES {
+            return Err(io::Error::last_os_error());
+        }
+        let attrs = if hidden {
+            attrs | FILE_ATTRIBUTE_HIDDEN
+        } else {
+            attrs & !FILE_ATTRIBUTE_HIDDEN
+        };
+        if unsafe { SetFileAttributesW(p.as_ptr(), attrs) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (path, hidden);
+    Ok(())
+}
 impl TreeCache {
     pub fn new(cache: &Path, offer: &Offer) -> io::Result<Self> {
+        Self::allocate(cache, offer, false)
+    }
+    /// The destination already exists and belongs to the user: never chmod it.
+    pub fn new_drop(cache: &Path, offer: &Offer) -> io::Result<Self> {
+        Self::allocate(cache, offer, true)
+    }
+    fn allocate(cache: &Path, offer: &Offer, drop_lane: bool) -> io::Result<Self> {
         offer.validate()?;
-        fs::create_dir_all(cache)?;
+        if !drop_lane {
+            fs::create_dir_all(cache)?;
+        }
         if !local(&fs::symlink_metadata(cache)?) || !cache.is_dir() {
             return Err(invalid("unsafe private cache directory"));
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(cache, fs::Permissions::from_mode(0o700))?;
+            if !drop_lane {
+                fs::set_permissions(cache, fs::Permissions::from_mode(0o700))?;
+            }
         }
         let mut id = [0; 16];
         getrandom::getrandom(&mut id).map_err(|e| io::Error::other(e.to_string()))?;
-        let root = cache.join(id.iter().map(|b| format!("{b:02x}")).collect::<String>());
+        let name = id.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let root = cache.join(if drop_lane {
+            format!(".crossdesk-drop-{name}")
+        } else {
+            name
+        });
         directory(&root)?;
         let mut batch = Self {
             root: Some(root.clone()),
@@ -68,6 +109,9 @@ impl TreeCache {
             top: Vec::new(),
             current: None,
         };
+        if drop_lane {
+            set_hidden(&root, true)?;
+        }
         let mut used: HashMap<Option<u16>, HashSet<String>> = HashMap::new();
         for entry in &offer.entries {
             let parent = entry

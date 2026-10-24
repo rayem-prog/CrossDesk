@@ -128,6 +128,7 @@ fn run_session(server: &str, key: &[u8; 32]) -> std::io::Result<()> {
     eprintln!("connecting to {server}");
     let mut stream = SecureStream::connect(server, key)?;
     stream.set_nodelay(true)?;
+    let endpoint = stream.peer_addr()?;
     let writer = SharedWriter::new(stream.try_clone()?);
     let _transport = crate::shutdown::register_transport(&stream)?;
     eprintln!("connected; waiting for server hello");
@@ -177,6 +178,10 @@ fn run_session(server: &str, key: &[u8; 32]) -> std::io::Result<()> {
     let _diagnostic_session = crate::diagnostics::begin_session();
     let mut input_log = InputLog::new();
     crate::service_event::emit(crate::service_event::ServiceState::Connected, None);
+    crate::edge_drop::primary_connected(server_hello.edge_drop);
+    let _edge_session = ClientEdgeSession;
+    let lane = (server_hello.edge_drop && crate::edge_channel::supported())
+        .then(|| crate::edge_channel::ClientLane::start(endpoint, *key, writer.clone()));
 
     loop {
         if crate::shutdown::requested() {
@@ -187,6 +192,12 @@ fn run_session(server: &str, key: &[u8; 32]) -> std::io::Result<()> {
             Err(_) if crate::shutdown::requested() => return Ok(()),
             Err(e) => return Err(e),
         };
+        if frame.kind == FrameKind::DropTicket {
+            if let Some(lane) = &lane {
+                lane.receive(frame.payload);
+            }
+            continue;
+        }
         if ClipboardSession::handles(frame.kind) {
             if let Err(error) = images.receive(frame) {
                 eprintln!("clipboard transfer rejected: {error}");
@@ -466,5 +477,12 @@ fn clipboard_summary(payload: &ClipboardPayload) -> String {
         ClipboardPayload::Text(text) => format!("text ({} chars)", text.chars().count()),
         ClipboardPayload::Bitmap(bitmap) => format!("image ({} bytes)", bitmap.len()),
         ClipboardPayload::Files(files) => format!("files ({} item(s))", files.len()),
+    }
+}
+
+struct ClientEdgeSession;
+impl Drop for ClientEdgeSession {
+    fn drop(&mut self) {
+        crate::edge_drop::primary_disconnected();
     }
 }

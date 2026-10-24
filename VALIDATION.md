@@ -1,3 +1,26 @@
+# CrossDesk 0.7.0 validation — 2026-10-24
+
+The new screen-edge drop path is independent of general clipboard publication. It scans a bounded source tree once, offers a validated manifest, waits for a destination and explicit consent, then streams encrypted bounded chunks with per-frame acknowledgments and SHA-256. Receive staging belongs to its selected parent; OS-enforced exclusive rename publishes a complete batch without replacement. Failed, cancelled and disconnected active batches remove owned staging. A successful rename remains saved even if a later acknowledgment fails. Path and snapshot sizes are bounded before reception.
+
+A fresh Noise connection attaches to the live primary session through a one-use 256-bit ticket on the same TCP port. Capability bit0x08 keeps v7 Hello dimensions and old-peer decoding unchanged. Pending handshakes are bounded to four with absolute deadlines. Lane failure preserves primary traffic; primary failure invalidates tickets and closes the lane. Runtime settings use lane status and do not change support negotiation.
+
+Native source paths come only from Tauri drag/drop. Destination selection stays local; open-folder commands take only a completed transfer ID. Main-window close exits; overlay close rejects/cancels or dismisses. Native no-activation display is implemented separately on Windows/macOS. Web overlays consume events without recurring polls; the native monitor queries primary-display geometry independently of the hidden main view.
+
+## Automated checks and limits
+
+- Final local GUI Rust: **252 passed / 5 ignored**; CLI Rust: **187 passed / 3 ignored**. Web: **44 passed**, production build passed; corresponding-source package regression: **1 passed**. Ignored comparison and large-streaming checks are selected separately; native Windows clipboard checks run only on CI.
+- The release loopback comparison passed. Native CI and explicit large-streaming results are recorded in delivery evidence.
+- Engine regressions include consent before content, source mutation after offer, bounded ACK backpressure, simultaneous encrypted tree transfers, rejected/busy requests, source/destination limits, checksum cleanup, exclusive collision, offer/receive expiry, and disconnect cleanup/join.
+- Local IPC tests use an isolated child process to preserve Chinese, quotes and embedded newlines without injecting commands; malformed/oversized events are consumed rather than logged. Disconnect clears stale state.
+- Mac clipboard preservation uses an independently named NSPasteboard, checking both content and revision around a real disk receive. Windows clipboard preservation is an explicitly selected ignored test on the disposable native CI runner.
+- Existing text/image/file/folder/native clipboard, input queue, pacing, pairing and reconnect tests remain in place. The separate 129 MiB streaming regression is selected explicitly in release mode.
+- The opt-in release loopback comparison sends 2,000 ordered input frames in each mode. A separate lane is proven stalled by an actual socket write timeout after queueing524,288bytes. Idle versus stalled lane primary-write p95 was14/15microseconds, roundtrip p95 was115/77microseconds in this sample. This is a controlled network-stage observation, not OS input injection, LAN/Wi-Fi performance or screen end-to-end latency; it does not establish a universal perceived improvement.
+- Browser previews verify native-sized card layout and visible accept/progress/cancel controls through a DEV-only native-boundary fixture. They do not replace real Finder/Explorer drag acceptance or physical two-device testing. No installed app is replaced/restarted and no login item is changed.
+
+Delivery requires native Mac/Windows automated builds and source-inclusive test packages plus a draft PR, without a physical acceptance gate or formal release.
+
+---
+
 # CrossDesk 0.6.2 validation — 2026-10-23
 
 Background operation is explicit: hiding preserves the Rust controller, window close and tray quit still run asynchronous shutdown. Native tray setup failure keeps a reachable window. Login startup is opt-in through the official Tauri plugin, uses `gui --background`, reads actual OS state and reports failure. Tests never enable login items or launch the real user application.

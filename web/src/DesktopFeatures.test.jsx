@@ -35,3 +35,10 @@ test('an older native without visibility query retains document visibility polli
  vi.useFakeTimers();const api=boundary({get_window_visibility:()=>{throw new Error('unknown command get_window_visibility');}});render(<App api={api} refreshMs={600}/>);await act(async()=>{});await act(async()=>{await vi.advanceTimersByTimeAsync(1200);});expect(api.mock.calls.filter(([name])=>name==='get_connect_state').length).toBe(3);
  expect(screen.queryByRole('alert')).toBeNull();
 });
+test('edge position applies immediately while connected without restarting the link',async()=>{
+ let dropEdge='left';const api=boundary({get_connect_state:()=>({...base,dropEdge}),set_drop_edge:({edge})=>{dropEdge=edge;}});render(<App api={api}/>);
+ await userEvent.click(screen.getByRole('button',{name:'高级设置'}));const select=await screen.findByRole('combobox',{name:'屏幕投送入口'});
+ expect(select.disabled).toBe(false);await userEvent.selectOptions(select,'off');
+ await waitFor(()=>expect(select.value).toBe('off'));expect(api).toHaveBeenCalledWith('set_drop_edge',{edge:'off'});
+ expect(api.mock.calls.some(([name])=>name==='disconnect_device'||name==='connect_device')).toBe(false);
+});

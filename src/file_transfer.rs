@@ -392,5 +392,5 @@ mod tests;
 
 pub mod session;
 pub mod tree;
-mod tree_cache;
+pub(crate) mod tree_cache;
 pub mod wire;

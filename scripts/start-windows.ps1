@@ -13,7 +13,7 @@ if (-not (Test-Path -LiteralPath $taskKey)) {
 Write-Host ''
 Write-Host 'CrossDesk: Windows keyboard and mouse -> Mac; both screen edges enabled.'
 Write-Host "Copy this pairing file to the Mac package folder: $taskKey"
-Write-Host 'CrossDesk 0.6.2 is recommended on both computers. Protocol v7 is required; text needs 0.6.0 or later. Text, image and file/folder sync default on.'
+Write-Host 'CrossDesk 0.7.0 is recommended on both computers. Protocol v7 is required; text needs 0.6.0 or later. Text, image and file/folder sync default on.'
 Write-Host 'Windows LAN address candidates:'
 Get-NetIPConfiguration -ErrorAction SilentlyContinue |
     Where-Object { $_.IPv4DefaultGateway } |

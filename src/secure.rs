@@ -159,6 +159,14 @@ impl SecureStream {
     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         self.reader.shutdown(how)
     }
+    pub fn peer_addr(&self) -> io::Result<std::net::SocketAddr> {
+        self.reader.peer_addr()
+    }
+    pub(crate) fn finish_deadline(&mut self) -> io::Result<()> {
+        self.reader.finish_deadline()?;
+        self.writer.lock().map_err(poisoned)?.finish_deadline()?;
+        self.set_read_timeout(Some(LIVENESS_TIMEOUT))
+    }
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.reader.set_read_timeout(timeout)
     }
@@ -255,6 +263,44 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> io::Error {
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    #[test]
+    fn fresh_noise_sockets_never_share_transport_keys_or_accept_each_others_ciphertext() {
+        fn pair() -> (SecureStream, SecureStream) {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint = listener.local_addr().unwrap().to_string();
+            let worker = std::thread::spawn(move || {
+                SecureStream::accept(listener.accept().unwrap().0, &[5; 32]).unwrap()
+            });
+            let client = SecureStream::connect(&endpoint, &[5; 32]).unwrap();
+            (client, worker.join().unwrap())
+        }
+        let (first, _first_peer) = pair();
+        let (second, second_peer) = pair();
+        let mut one = [0; 64];
+        let mut two = [0; 64];
+        let n = first
+            .cipher
+            .lock()
+            .unwrap()
+            .write_message(b"same input", &mut one)
+            .unwrap();
+        let m = second
+            .cipher
+            .lock()
+            .unwrap()
+            .write_message(b"same input", &mut two)
+            .unwrap();
+        assert_ne!(&one[..n], &two[..m]);
+        assert!(
+            second_peer
+                .cipher
+                .lock()
+                .unwrap()
+                .read_message(&one[..n], &mut [0; 64])
+                .is_err()
+        );
+    }
 
     #[test]
     fn accepted_nonblocking_socket_waits_for_handshake_and_delayed_hello() {

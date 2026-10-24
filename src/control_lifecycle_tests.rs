@@ -2,6 +2,15 @@ use super::*;
 use crate::service_event::{ServiceEvent, ServiceState};
 use std::io::BufRead;
 #[test]
+fn structured_drop_events_are_not_human_logs() {
+    let (tx, rx) = mpsc::sync_channel(8);
+    let line = b"crossdesk-drop\t{\"enabled\":true,\"peerSupported\":true,\"channel\":\"ready\",\"outgoing\":null,\"incoming\":null}\n";
+    spawn_log_reader(&line[..], tx, None, None, None, None)
+        .join()
+        .unwrap();
+    assert!(rx.try_recv().is_err(), "drop events leaked into human logs");
+}
+#[test]
 #[ignore = "backend subprocess fixture only"]
 fn child_fixture() {
     if std::env::var_os("CROSSDESK_TEST_CHILD").is_none() {
@@ -91,6 +100,22 @@ fn child_fixture() {
                 println!("diagnostic stop received");
                 std::io::stdout().flush().unwrap();
             }
+            "drop-status" => {
+                println!(
+                    "crossdesk-drop\t{{\"enabled\":true,\"peerSupported\":true,\"peerEnabled\":true,\"channel\":\"ready\",\"outgoing\":null,\"incoming\":null}}"
+                );
+                std::io::stdout().flush().unwrap();
+            }
+            command if command.starts_with(crate::drop_ipc::COMMAND_PREFIX) => {
+                if let Ok(Some(crate::edge_drop::DropCommand::Send { paths })) =
+                    crate::drop_ipc::parse_command(command)
+                {
+                    if paths == [std::env::temp_dir().join("中文\"\nstop.pdf")] {
+                        println!("drop paths received intact");
+                        std::io::stdout().flush().unwrap();
+                    }
+                }
+            }
             "stop" => return,
             _ => {}
         }
@@ -138,6 +163,79 @@ fn wait_state(b: &mut ProcessBackend, want: ServiceState) {
         );
         thread::sleep(Duration::from_millis(10));
     }
+}
+#[test]
+fn drop_control_preserves_paths_and_disconnect_discards_old_status() {
+    let mut cmd = Command::new(std::env::current_exe().unwrap());
+    cmd.args([
+        "--exact",
+        "control::lifecycle_tests::child_fixture",
+        "--ignored",
+        "--nocapture",
+    ])
+    .env("CROSSDESK_TEST_CHILD", "1");
+    let mut b = ProcessBackend::default();
+    assert!(
+        b.send_drop_command(crate::edge_drop::DropCommand::SetEnabled { enabled: true })
+            .is_err()
+    );
+    b.spawn(cmd).unwrap();
+    wait_state(&mut b, ServiceState::Listening);
+    b.child_stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"connect\ndrop-status\n")
+        .unwrap();
+    wait_state(&mut b, ServiceState::Connected);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while b.drop_view().channel != "ready" {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    b.send_drop_command(crate::edge_drop::DropCommand::Send {
+        paths: vec![std::env::temp_dir().join("中文\"\nstop.pdf")],
+    })
+    .unwrap();
+    loop {
+        b.collect_logs();
+        if b.logs
+            .iter()
+            .any(|line| line == "drop paths received intact")
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    b.child_stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"retry\ndrop-status\n")
+        .unwrap();
+    wait_state(&mut b, ServiceState::Retrying);
+    assert_eq!(b.drop_view().channel, "disconnected");
+    b.stop().unwrap();
+    assert_eq!(b.drop_view().channel, "disconnected");
+}
+
+#[test]
+fn malformed_or_truncated_drop_events_never_leak_into_logs() {
+    let input = format!(
+        "crossdesk-drop\t{}\ncrossdesk-drop\tinvalid json\nordinary log\n",
+        "x".repeat(20000)
+    );
+    let (tx, rx) = mpsc::sync_channel(8);
+    spawn_log_reader(
+        std::io::Cursor::new(input.into_bytes()),
+        tx,
+        None,
+        None,
+        None,
+        None,
+    )
+    .join()
+    .unwrap();
+    assert_eq!(rx.try_iter().collect::<Vec<_>>(), ["ordinary log"]);
 }
 #[test]
 fn a_live_process_is_not_connected_and_repeated_stops_reap_it() {

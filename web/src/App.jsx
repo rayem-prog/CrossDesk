@@ -4,7 +4,7 @@ import {listen} from '@tauri-apps/api/event';
 import {ArrowRightLeft,SlidersHorizontal,AlertCircle,ExternalLink} from 'lucide-react';
 import {ConnectHome} from './ConnectHome.jsx';
 import {AdvancedSettings} from './AdvancedSettings.jsx';
-const initial={platform:'macos',state:'starting',devices:[],selectedId:null,error:null,autoConnect:true,textClipboard:true,textClipboardActive:null,imageClipboard:true,fileClipboard:true,logs:[],appVersion:'0.6.2'};
+const initial={platform:'macos',state:'starting',devices:[],selectedId:null,error:null,autoConnect:true,textClipboard:true,textClipboardActive:null,imageClipboard:true,fileClipboard:true,logs:[],appVersion:'0.7.0'};
 export function App({api=invoke,refreshMs=600,preview=false}){
  const [view,setView]=useState(initial),[busy,setBusy]=useState(false),[error,setError]=useState(''),[settings,setSettings]=useState(false);const mounted=useRef(true);const settingsButton=useRef(null);const refresh=useRef(()=>{});const [desktop,setDesktop]=useState({backgroundAvailable:false,startAtLogin:false});const [desktopBusy,setDesktopBusy]=useState(false);const desktopGeneration=useRef(0);
  useEffect(()=>{
@@ -28,7 +28,7 @@ export function App({api=invoke,refreshMs=600,preview=false}){
  async function setLogin(enabled){desktopGeneration.current++;setDesktopBusy(true);setError('');try{const state=await api('set_start_at_login',{enabled});if(mounted.current){if(typeof state?.startAtLogin!=='boolean')throw new Error('无法确认登录启动设置');setDesktop(state);if(state.error)setError(state.error);}}catch(e){if(mounted.current)setError(String(e));}finally{if(mounted.current)setDesktopBusy(false);}}
 
  async function action(name,args={}){setError('');setBusy(true);try{const result=await api(name,args);refresh.current();return name==='export_input_diagnostics'?result:true;}catch(e){if(mounted.current)setError(String(e));return false;}finally{if(mounted.current)setBusy(false);}}
- const closeSettings=()=>{setSettings(false);requestAnimationFrame(()=>settingsButton.current?.focus());};const message=error||view.error;
+ const closeSettings=()=>{setSettings(false);requestAnimationFrame(()=>settingsButton.current?.focus());};const message=error||view.error||view.dropError||desktop.error;
  return <><div className="app-frame" inert={settings||undefined}><header className="app-header"><div className="brand"><span className="brand-mark"><ArrowRightLeft size={21} strokeWidth={2.2}/></span><strong>CrossDesk</strong></div><button ref={settingsButton} className="icon-button" onClick={()=>setSettings(true)} aria-label="高级设置" title="高级设置"><SlidersHorizontal size={20}/></button></header>
  {preview&&<div className="preview-banner">界面预览 · 演示数据</div>}
  <main><div className="background-actions"><button className="text-button" disabled={!desktop.backgroundAvailable||busy} onClick={()=>action('hide_to_background')}>后台运行</button><small>关闭窗口将退出应用</small></div><ConnectHome view={view} busy={busy||view.busy} onSelect={id=>action('select_device',{id})} onPair={code=>action('pair_device',{code})} onConnect={()=>action('connect_device')} onDisconnect={()=>action('disconnect_device')} onRefresh={()=>action('refresh_devices')}/>

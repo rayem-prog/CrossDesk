@@ -583,3 +583,149 @@ fn diagnostic_commands_preserve_connection_and_disconnected_views_hide_old_repor
     core.shutdown();
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn edge_choice_is_persistent_and_defaults_follow_the_local_screen_side() {
+    let mut nonce = [0; 8];
+    getrandom::getrandom(&mut nonce).unwrap();
+    let root = std::env::temp_dir().join(format!("crossdesk-edge-{nonce:x?}"));
+    let store = Arc::new(TrustedStore::new(root.clone()).unwrap());
+    let mut core = Core::from_parts(
+        "windows",
+        store.clone(),
+        Box::new(MemoryService(Arc::new(Mutex::new(ServiceState::Stopped)))),
+    )
+    .unwrap();
+    assert_eq!(core.view().drop_edge, "right");
+    core.command(Command::DropEdge("off".into())).unwrap();
+    let restored = Core::from_parts(
+        "windows",
+        store.clone(),
+        Box::new(MemoryService(Arc::new(Mutex::new(ServiceState::Stopped)))),
+    )
+    .unwrap();
+    assert_eq!(restored.view().drop_edge, "off");
+    assert!(core.command(Command::DropEdge("top".into())).is_err());
+    assert_eq!(core.view().drop_edge, "off");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_disconnected_drop_cannot_forward_source_paths() {
+    let mut nonce = [0; 8];
+    getrandom::getrandom(&mut nonce).unwrap();
+    let root = std::env::temp_dir().join(format!("crossdesk-drop-disconnected-{nonce:x?}"));
+    let store = Arc::new(TrustedStore::new(root.clone()).unwrap());
+    let mut core = Core::from_parts(
+        "macos",
+        store,
+        Box::new(MemoryService(Arc::new(Mutex::new(ServiceState::Stopped)))),
+    )
+    .unwrap();
+    assert_eq!(core.view().drop_edge, "left");
+    let error = core
+        .command(Command::Drop(crate::edge_drop::DropCommand::Send {
+            paths: vec!["/tmp/a".into()],
+        }))
+        .unwrap_err();
+    assert!(error.to_string().contains("连接"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+struct DropService {
+    inner: MemoryService,
+    enabled_commands: Arc<Mutex<Vec<bool>>>,
+    starts: Arc<Mutex<u32>>,
+}
+impl ServiceControl for DropService {
+    fn start(&mut self, c: &AppConfig, k: &Path, i: bool, f: bool, t: bool) -> io::Result<()> {
+        *self.starts.lock().unwrap() += 1;
+        self.inner.start(c, k, i, f, t)
+    }
+    fn stop(&mut self) -> io::Result<()> {
+        self.inner.stop()
+    }
+    fn poll(&mut self) -> (ServiceState, Option<String>) {
+        self.inner.poll()
+    }
+    fn logs(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn send_drop_command(&mut self, c: crate::edge_drop::DropCommand) -> io::Result<()> {
+        if let crate::edge_drop::DropCommand::SetEnabled { enabled } = c {
+            self.enabled_commands.lock().unwrap().push(enabled);
+        }
+        Ok(())
+    }
+}
+#[test]
+fn edge_off_initializes_disabled_and_switches_live_without_restarting_connection() {
+    let mut nonce = [0; 8];
+    getrandom::getrandom(&mut nonce).unwrap();
+    let root = std::env::temp_dir().join(format!("crossdesk-edge-live-{nonce:x?}"));
+    let store = Arc::new(TrustedStore::new(root.clone()).unwrap());
+    store.stage([9; 16], &[6; 32]).unwrap();
+    store.commit([9; 16]).unwrap();
+    let mut prefs = Preferences::default();
+    prefs.drop_edge = "off".into();
+    prefs.save(&store).unwrap();
+    let state = Arc::new(Mutex::new(ServiceState::Stopped));
+    let commands = Arc::new(Mutex::new(Vec::new()));
+    let starts = Arc::new(Mutex::new(0));
+    let mut core = Core::from_parts(
+        "windows",
+        store,
+        Box::new(DropService {
+            inner: MemoryService(state.clone()),
+            enabled_commands: commands.clone(),
+            starts: starts.clone(),
+        }),
+    )
+    .unwrap();
+    core.tick().unwrap();
+    assert_eq!(*commands.lock().unwrap(), vec![false]);
+    *state.lock().unwrap() = ServiceState::Connected;
+    core.tick().unwrap();
+    core.command(Command::DropEdge("left".into())).unwrap();
+    assert_eq!(*commands.lock().unwrap(), vec![false, true]);
+    assert_eq!(*starts.lock().unwrap(), 1);
+    core.command(Command::DropEdge("off".into())).unwrap();
+    assert!(
+        core.command(Command::Drop(crate::edge_drop::DropCommand::Send {
+            paths: vec!["/tmp/a".into()]
+        }))
+        .is_err()
+    );
+    assert_eq!(*commands.lock().unwrap(), vec![false, true, false]);
+    assert_eq!(*starts.lock().unwrap(), 1);
+    core.shutdown();
+    std::fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn native_drop_command_error_survives_connected_tick_and_clears_on_edge_change() {
+    let mut nonce = [0; 8];
+    getrandom::getrandom(&mut nonce).unwrap();
+    let root = std::env::temp_dir().join(format!("crossdesk-drop-error-{nonce:x?}"));
+    let store = Arc::new(TrustedStore::new(root.clone()).unwrap());
+    let state = Arc::new(Mutex::new(ServiceState::Stopped));
+    let mut core =
+        Core::from_parts("macos", store, Box::new(MemoryService(state.clone()))).unwrap();
+    assert!(
+        core.command(Command::Drop(crate::edge_drop::DropCommand::Send {
+            paths: vec!["/tmp/a".into()]
+        }))
+        .is_err()
+    );
+    *state.lock().unwrap() = ServiceState::Connected;
+    core.tick().unwrap();
+    assert!(
+        core.view()
+            .drop_error
+            .as_deref()
+            .is_some_and(|message| message.contains("连接"))
+    );
+    core.command(Command::DropEdge("off".into())).unwrap();
+    assert!(core.view().drop_error.is_none());
+    core.shutdown();
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -37,6 +37,26 @@ impl Socket {
             }),
         })
     }
+    pub fn deadline(
+        stream: TcpStream,
+        stop: Arc<AtomicBool>,
+        deadline: Instant,
+    ) -> io::Result<Self> {
+        stream.set_nonblocking(true)?;
+        Ok(Self {
+            stream,
+            cancellation: Some(Cancellation { stop, deadline }),
+        })
+    }
+    pub fn finish_deadline(&mut self) -> io::Result<()> {
+        self.check()?;
+        self.stream.set_nonblocking(false)?;
+        self.cancellation = None;
+        Ok(())
+    }
+    pub fn peer_addr(&self) -> io::Result<std::net::SocketAddr> {
+        self.stream.peer_addr()
+    }
     fn check(&self) -> io::Result<()> {
         if let Some(c) = &self.cancellation {
             if c.stop.load(Ordering::Acquire) {

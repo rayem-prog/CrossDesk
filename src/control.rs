@@ -49,6 +49,7 @@ pub struct ProcessBackend {
     diagnostics: Arc<Mutex<DiagnosticTracker>>,
     transfers: Arc<Mutex<crate::service_event::TransferTracker>>,
     capabilities: Arc<Mutex<Option<crate::service_event::ClipboardCapabilities>>>,
+    drops: Arc<Mutex<crate::edge_drop::DropView>>,
 }
 
 impl ControlBackend for ProcessBackend {
@@ -62,6 +63,7 @@ impl ControlBackend for ProcessBackend {
                     *self.diagnostics.lock().unwrap() = Default::default();
                     *self.transfers.lock().unwrap() = Default::default();
                     self.capabilities.lock().unwrap().take();
+                    *self.drops.lock().unwrap() = Default::default();
                     self.status = ServiceEvent {
                         state: ServiceState::Error,
                         message: Some(format!("服务已退出: {status}")),
@@ -90,6 +92,7 @@ impl ControlBackend for ProcessBackend {
             .args(&launch.args)
             .envs(launch.env.iter().map(|(key, value)| (key, value)))
             .env("DESKBRIDGE_GUI_CHILD", "1")
+            .env("CROSSDESK_EDGE_DROP", "off")
             .env_remove("CROSSDESK_ENABLE_CLIPBOARD");
         self.spawn(command)
     }
@@ -283,8 +286,32 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
     capabilities: Option<Arc<Mutex<Option<crate::service_event::ClipboardCapabilities>>>>,
     diagnostics: Option<Arc<Mutex<DiagnosticTracker>>>,
 ) -> std::thread::JoinHandle<()> {
+    spawn_service_reader(
+        reader,
+        sender,
+        events,
+        transfers,
+        capabilities,
+        diagnostics,
+        None,
+    )
+}
+
+fn spawn_service_reader<R: std::io::Read + Send + 'static>(
+    reader: R,
+    sender: SyncSender<String>,
+    events: Option<Arc<Mutex<Option<ServiceEvent>>>>,
+    transfers: Option<Arc<Mutex<crate::service_event::TransferTracker>>>,
+    capabilities: Option<Arc<Mutex<Option<crate::service_event::ClipboardCapabilities>>>>,
+    diagnostics: Option<Arc<Mutex<DiagnosticTracker>>>,
+    drops: Option<Arc<Mutex<crate::edge_drop::DropView>>>,
+) -> std::thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut reader = BufReader::new(reader);
+        #[cfg(feature = "gui")]
+        let mut connection_ready = false;
+        #[cfg(feature = "gui")]
+        let mut seen_state = false;
         loop {
             let mut bytes = Vec::new();
             let n = std::io::BufRead::read_until(
@@ -315,6 +342,16 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
                 }
             }
             let line = String::from_utf8_lossy(&bytes).trim_end().to_string();
+            if line.starts_with("crossdesk-drop\t") {
+                #[cfg(feature = "gui")]
+                if !truncated && (!seen_state || connection_ready) {
+                    if let (Some(slot), Some(view)) = (&drops, crate::drop_ipc::parse_event(&line))
+                    {
+                        *slot.lock().unwrap() = view;
+                    }
+                }
+                continue;
+            }
             if !truncated {
                 if let Some(event) = crate::diagnostics::parse_event(&line) {
                     if let Some(slot) = &diagnostics {
@@ -343,7 +380,16 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
                     continue;
                 }
                 if let (Some(slot), Some(event)) = (&events, crate::service_event::parse(&line)) {
-                    if event.state != ServiceState::Connected {
+                    let connected = event.state == ServiceState::Connected;
+                    #[cfg(feature = "gui")]
+                    {
+                        connection_ready = connected;
+                        seen_state = true;
+                    }
+                    if !connected {
+                        if let Some(drops) = &drops {
+                            *drops.lock().unwrap() = Default::default();
+                        }
                         if let Some(diagnostics) = &diagnostics {
                             *diagnostics.lock().unwrap() = Default::default();
                         }
@@ -387,10 +433,34 @@ impl Default for ProcessBackend {
             diagnostics: Arc::new(Mutex::new(Default::default())),
             transfers: Arc::new(Mutex::new(Default::default())),
             capabilities: Arc::new(Mutex::new(None)),
+            drops: Arc::new(Mutex::new(Default::default())),
         }
     }
 }
 impl ProcessBackend {
+    pub fn drop_view(&self) -> crate::edge_drop::DropView {
+        if self.child.is_some() && self.status.state == ServiceState::Connected {
+            self.drops.lock().unwrap().clone()
+        } else {
+            Default::default()
+        }
+    }
+    #[cfg(feature = "gui")]
+    pub fn send_drop_command(
+        &mut self,
+        command: crate::edge_drop::DropCommand,
+    ) -> std::io::Result<()> {
+        if !self.is_running() {
+            return Err(std::io::Error::other("请先连接设备"));
+        }
+        let bytes = crate::drop_ipc::encode_command(&command)?;
+        let stdin = self
+            .child_stdin
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("服务控制通道不可用"))?;
+        stdin.write_all(&bytes)?;
+        stdin.flush()
+    }
     pub fn diagnostics(&self) -> DiagnosticView {
         if self.child.is_some() && self.status.state == ServiceState::Connected {
             self.diagnostics.lock().unwrap().view.clone()
@@ -474,6 +544,7 @@ impl ProcessBackend {
         *self.diagnostics.lock().unwrap() = Default::default();
         *self.transfers.lock().unwrap() = Default::default();
         self.capabilities.lock().unwrap().take();
+        *self.drops.lock().unwrap() = Default::default();
         self.child_stdin = None;
         self.receiver = None;
         self.status = ServiceEvent {
@@ -492,14 +563,16 @@ impl ProcessBackend {
         *self.diagnostics.lock().unwrap() = Default::default();
         *self.transfers.lock().unwrap() = Default::default();
         self.capabilities.lock().unwrap().take();
+        *self.drops.lock().unwrap() = Default::default();
         if let Some(out) = child.stdout.take() {
-            self.readers.push(spawn_log_reader(
+            self.readers.push(spawn_service_reader(
                 out,
                 tx.clone(),
                 Some(self.latest.clone()),
                 Some(self.transfers.clone()),
                 Some(self.capabilities.clone()),
                 Some(self.diagnostics.clone()),
+                Some(self.drops.clone()),
             ));
         }
         if let Some(err) = child.stderr.take() {
@@ -533,6 +606,7 @@ impl ProcessBackend {
         cmd.args(&launch.args)
             .envs(launch.env)
             .env("DESKBRIDGE_GUI_CHILD", "1")
+            .env("CROSSDESK_EDGE_DROP", "off")
             .env_remove("CROSSDESK_ENABLE_CLIPBOARD");
         cmd.arg("--key-file").arg(key).args([
             "--image-clipboard",

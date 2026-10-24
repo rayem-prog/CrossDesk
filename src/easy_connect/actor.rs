@@ -27,11 +27,15 @@ impl Controller {
                 }
                 loop {
                     match rx.recv_timeout(Duration::from_millis(100)) {
-                        Ok(command) => match core.command(command) {
-                            Ok(false) => break,
-                            Err(e) => core.error = Some(e.to_string()),
-                            _ => {}
-                        },
+                        Ok(command) => {
+                            let is_drop =
+                                matches!(&command, Command::Drop(_) | Command::DropEdge(_));
+                            match core.command(command) {
+                                Ok(false) => break,
+                                Err(e) if !is_drop => core.error = Some(e.to_string()),
+                                _ => {}
+                            }
+                        }
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
@@ -62,6 +66,21 @@ impl Controller {
             view.state.clone(),
             view.devices.iter().any(|d| d.paired),
             view.error.clone(),
+        )
+    }
+    pub fn drop_error(&self) -> Option<String> {
+        self.view.lock().unwrap().drop_error.clone()
+    }
+    pub fn drop_status(&self) -> (String, crate::edge_drop::DropView, String) {
+        let view = self.view.lock().unwrap();
+        (
+            view.drop_edge.clone(),
+            view.drop.clone(),
+            view.devices
+                .iter()
+                .find(|device| device.paired)
+                .map(|device| device.name.clone())
+                .unwrap_or_else(|| "已配对设备".into()),
         )
     }
     pub fn submit(&self, command: Command) -> io::Result<()> {
