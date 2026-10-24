@@ -1,6 +1,6 @@
 //! Coordinates are relative to the complete Windows desktop on the wire;
 //! monitor joins and negative monitor origins remain local implementation details.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MonitorRect {
     pub left: i32,
     pub top: i32,
@@ -8,6 +8,7 @@ pub struct MonitorRect {
     pub bottom: i32,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct DesktopLayout {
     pub monitors: Vec<MonitorRect>,
     pub bounds: MonitorRect,
@@ -24,6 +25,7 @@ impl DesktopLayout {
                 bottom: 1,
             });
         }
+        monitors.sort_by_key(|r| (r.left, r.top, r.right, r.bottom));
         let bounds = MonitorRect {
             left: monitors.iter().map(|r| r.left).min().unwrap(),
             top: monitors.iter().map(|r| r.top).min().unwrap(),
@@ -94,6 +96,38 @@ impl DesktopLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn detects_origin_and_topology_changes_with_identical_outer_size() {
+        let original = DesktopLayout::new(vec![MonitorRect {
+            left: 0,
+            top: 0,
+            right: 1000,
+            bottom: 800,
+        }]);
+        let moved = DesktopLayout::new(vec![MonitorRect {
+            left: -1000,
+            top: 0,
+            right: 0,
+            bottom: 800,
+        }]);
+        let split = DesktopLayout::new(vec![
+            MonitorRect {
+                left: 0,
+                top: 0,
+                right: 500,
+                bottom: 800,
+            },
+            MonitorRect {
+                left: 500,
+                top: 0,
+                right: 1000,
+                bottom: 800,
+            },
+        ]);
+        assert_eq!(original.size(), moved.size());
+        assert_ne!(original, moved);
+        assert_ne!(original, split);
+    }
     #[test]
     fn negative_origins_and_internal_joins_do_not_become_edges() {
         let d = DesktopLayout::new(vec![

@@ -5,7 +5,7 @@ import {render,screen,cleanup,waitFor} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {App} from './App.jsx';
 afterEach(cleanup);
-const view={platform:'macos',state:'pairing',devices:[{id:'a'.repeat(32),name:'Windows',paired:false}],selectedId:'a'.repeat(32),pairingCode:null,secondsLeft:0,error:null,autoConnect:true,textClipboard:true,textClipboardActive:null,imageClipboard:true,fileClipboard:true,logs:[],appVersion:'0.6.0'};
+const view={platform:'macos',state:'pairing',devices:[{id:'a'.repeat(32),name:'Windows',paired:false}],selectedId:'a'.repeat(32),pairingCode:null,secondsLeft:0,error:null,autoConnect:true,textClipboard:true,textClipboardActive:null,imageClipboard:true,fileClipboard:true,logs:[],appVersion:'0.7.1'};
 test('polling does not erase the pairing code being typed',async()=>{
  const api=vi.fn(async()=>({...view}));render(<App api={api} refreshMs={25}/>);
  const input=await screen.findByLabelText('配对码');await userEvent.type(input,'001234');

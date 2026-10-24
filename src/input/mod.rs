@@ -18,6 +18,8 @@ pub use linux::InputSink;
 pub use linux::screen_size;
 #[cfg(target_os = "macos")]
 pub use macos::InputSink;
+#[cfg(target_os = "macos")]
+pub use macos::current_screen_size as screen_size;
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub use unsupported::InputSink;
@@ -25,3 +27,5 @@ pub use unsupported::InputSink;
 pub use unsupported::screen_size;
 #[cfg(windows)]
 pub use windows::InputSink;
+#[cfg(windows)]
+pub use windows::current_screen_size as screen_size;

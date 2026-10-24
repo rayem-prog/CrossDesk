@@ -37,6 +37,7 @@ impl SharedWriter {
         let input_priority = matches!(
             frame.kind,
             FrameKind::Input
+                | FrameKind::ScreenUpdate
                 | FrameKind::Ping
                 | FrameKind::Pong
                 | FrameKind::FileAck

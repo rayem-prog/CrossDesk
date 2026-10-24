@@ -4,7 +4,7 @@ import {listen} from '@tauri-apps/api/event';
 import {ArrowRightLeft,SlidersHorizontal,AlertCircle,ExternalLink} from 'lucide-react';
 import {ConnectHome} from './ConnectHome.jsx';
 import {AdvancedSettings} from './AdvancedSettings.jsx';
-const initial={platform:'macos',state:'starting',devices:[],selectedId:null,error:null,autoConnect:true,textClipboard:true,textClipboardActive:null,imageClipboard:true,fileClipboard:true,logs:[],appVersion:'0.7.0'};
+const initial={platform:'macos',state:'starting',devices:[],selectedId:null,error:null,autoConnect:true,textClipboard:true,textClipboardActive:null,imageClipboard:true,fileClipboard:true,logs:[],appVersion:'0.7.1'};
 export function App({api=invoke,refreshMs=600,preview=false}){
  const [view,setView]=useState(initial),[busy,setBusy]=useState(false),[error,setError]=useState(''),[settings,setSettings]=useState(false);const mounted=useRef(true);const settingsButton=useRef(null);const refresh=useRef(()=>{});const [desktop,setDesktop]=useState({backgroundAvailable:false,startAtLogin:false});const [desktopBusy,setDesktopBusy]=useState(false);const desktopGeneration=useRef(0);
  useEffect(()=>{

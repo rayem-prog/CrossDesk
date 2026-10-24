@@ -9,6 +9,7 @@ mod desktop;
 mod diagnostics;
 #[cfg(feature = "discovery")]
 mod discovery;
+mod display_sync;
 #[cfg(feature = "gui")]
 mod drop_ipc;
 #[cfg(feature = "gui")]

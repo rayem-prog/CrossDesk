@@ -55,6 +55,7 @@ impl InputSink {
     pub fn apply(&mut self, event: InputEvent) -> std::io::Result<()> {
         match event {
             InputEvent::MouseEnter { x, y } => self.mouse_enter(x, y),
+            InputEvent::ScreenSync { .. } => Ok(()),
             InputEvent::MouseLeave => {
                 self.mouse_leave();
                 Ok(())
@@ -278,9 +279,14 @@ fn send_input(input: INPUT) -> std::io::Result<()> {
     }
 }
 
-fn screen_size() -> (u32, u32) {
-    let width = unsafe { GetSystemMetrics(SM_CXSCREEN) }.max(1) as u32;
-    let height = unsafe { GetSystemMetrics(SM_CYSCREEN) }.max(1) as u32;
+pub fn screen_size() -> (u32, u32) {
+    let (width, height) = current_screen_size();
+    (width.max(1), height.max(1))
+}
+
+pub fn current_screen_size() -> (u32, u32) {
+    let width = unsafe { GetSystemMetrics(SM_CXSCREEN) }.max(0) as u32;
+    let height = unsafe { GetSystemMetrics(SM_CYSCREEN) }.max(0) as u32;
     (width, height)
 }
 

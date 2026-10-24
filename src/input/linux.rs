@@ -127,6 +127,7 @@ impl InputSink {
     pub fn apply(&mut self, event: InputEvent) -> io::Result<()> {
         match event {
             InputEvent::MouseEnter { x, y } => self.mouse_enter(x, y),
+            InputEvent::ScreenSync { .. } => Ok(()),
             InputEvent::MouseLeave => {
                 self.mouse_leave()?;
                 Ok(())

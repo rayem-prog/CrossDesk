@@ -1,5 +1,6 @@
 // CrossDesk image clipboard changes: 2026-10-20 (GPL-3.0-only).
 use crate::desktop::{DesktopLayout, MonitorRect};
+use crate::display_sync::ScreenUpdate;
 use crate::secure::SecureStream;
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -34,11 +35,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     LLKHF_UP, LLMHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, PostMessageW, PostQuitMessage,
     RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNA, SetCursorPos, SetLayeredWindowAttributes,
     SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WM_APP, WM_DROPFILES, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
-    WNDCLASSW, WS_EX_ACCEPTFILES, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP, XBUTTON1, XBUTTON2,
+    WH_MOUSE_LL, WM_APP, WM_DISPLAYCHANGE, WM_DROPFILES, WM_INPUT, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WS_EX_ACCEPTFILES, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, XBUTTON1, XBUTTON2,
 };
 
 use super::{Edge, ServerConfig};
@@ -65,6 +66,7 @@ const DROP_STRIP_ALPHA: u8 = 48;
 const CURSOR_LOCK_RADIUS: i32 = 24;
 const REMOTE_CLIPBOARD_SUPPRESS_WINDOW: Duration = Duration::from_millis(1200);
 const WM_DESKBRIDGE_STOP: u32 = WM_APP + 0x51;
+const WM_DESKBRIDGE_SCREEN_UPDATE: u32 = WM_APP + 0x52;
 
 static CONNECTION_ALIVE: AtomicBool = AtomicBool::new(false);
 static STOP_WINDOW: AtomicUsize = AtomicUsize::new(0);
@@ -126,6 +128,7 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
             hello.text_clipboard && crate::transport::text_clipboard_enabled(),
             hub.clone(),
             hello.edge_drop,
+            hello.screen_updates,
         ) {
             eprintln!("Session ended: {error}");
         }
@@ -148,6 +151,7 @@ fn run_session(
     texts_enabled: bool,
     edge_hub: crate::edge_channel::ServerHub,
     edge_supported: bool,
+    screen_updates: bool,
 ) -> std::io::Result<()> {
     let _transport = crate::shutdown::register_transport(&stream)?;
     let _diagnostic_session = crate::diagnostics::begin_session();
@@ -167,9 +171,14 @@ fn run_session(
 
     let clipboard_state = Arc::new(Mutex::new(ClipboardSyncState::default()));
     let input = InputEmitter::spawn(writer.clone())?;
-    let state = CaptureState::new(input, config.edge, remote_size);
+    let pending_screen = Arc::new(Mutex::new(None));
+    let state = CaptureState::new(input, config.edge, remote_size, pending_screen.clone());
     if let Some(existing) = CAPTURE_STATE.get() {
-        *existing.lock().unwrap() = state;
+        let previous = {
+            let mut existing = existing.lock().unwrap();
+            std::mem::replace(&mut *existing, state)
+        };
+        drop(previous);
     } else {
         let _ = CAPTURE_STATE.set(Arc::new(Mutex::new(state)));
     }
@@ -193,6 +202,9 @@ fn run_session(
         files_enabled,
         texts_enabled,
         edge_hub.clone(),
+        screen_updates,
+        pending_screen,
+        stop_window,
     );
     let ping_writer = writer.clone();
     let heartbeat_hub = edge_hub.clone();
@@ -234,10 +246,14 @@ fn run_session(
     CONNECTION_ALIVE.store(false, Ordering::Release);
     STOP_WINDOW.store(0, Ordering::Release);
     let _ = stop_stream.shutdown(Shutdown::Both);
-    if let Some(state) = CAPTURE_STATE.get() {
-        state.lock().unwrap().shutdown();
+    let input_worker = if let Some(state) = CAPTURE_STATE.get() {
+        state.lock().unwrap().shutdown()
     } else {
         unlock_cursor();
+        None
+    };
+    if let Some(worker) = input_worker {
+        let _ = worker.join();
     }
     drop(hooks);
     drop(raw_input);
@@ -255,6 +271,9 @@ fn spawn_inbound_reader(
     files_enabled: bool,
     texts_enabled: bool,
     edge_hub: crate::edge_channel::ServerHub,
+    screen_updates: bool,
+    pending_screen: Arc<Mutex<Option<ScreenUpdate>>>,
+    window: usize,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         struct Invalidate(crate::edge_channel::ServerHub);
@@ -283,6 +302,7 @@ fn spawn_inbound_reader(
         };
         let receive_root = std::env::temp_dir().join("deskbridge-received");
         let mut incoming_files = file_transfer::IncomingBundle::new(receive_root);
+        let mut screen_revision = 0;
 
         loop {
             let frame = match protocol::read_frame(&mut stream) {
@@ -293,6 +313,31 @@ fn spawn_inbound_reader(
                     break;
                 }
             };
+            if frame.kind == FrameKind::ScreenUpdate {
+                let update = match ScreenUpdate::decode(&frame.payload) {
+                    Ok(update) if screen_updates && update.revision > screen_revision => update,
+                    _ => {
+                        eprintln!("invalid or unnegotiated screen update");
+                        connection_lost();
+                        break;
+                    }
+                };
+                screen_revision = update.revision;
+                // The reader only publishes metadata. Capture and native cursor
+                // operations belong to the owning window thread.
+                let notify = {
+                    let mut pending = pending_screen.lock().unwrap();
+                    pending.replace(update).is_none()
+                };
+                if notify
+                    && unsafe { PostMessageW(window as HWND, WM_DESKBRIDGE_SCREEN_UPDATE, 0, 0) }
+                        == 0
+                {
+                    connection_lost();
+                    break;
+                }
+                continue;
+            }
             if frame.kind == FrameKind::DropTicket {
                 if frame.payload.is_empty() {
                     let _ = edge_hub.ticket();
@@ -712,6 +757,17 @@ unsafe extern "system" fn raw_input_proc(
         }
         return 0;
     }
+    if message == WM_DESKBRIDGE_SCREEN_UPDATE {
+        if let Some(state) = CAPTURE_STATE.get() {
+            state.lock().unwrap().apply_pending_screen();
+        }
+        return 0;
+    }
+    if matches!(message, WM_DISPLAYCHANGE | WM_SETTINGCHANGE) {
+        if let Some(state) = CAPTURE_STATE.get() {
+            state.lock().unwrap().refresh_desktop(true);
+        }
+    }
     if message == WM_INPUT {
         handle_raw_mouse_input(lparam);
         return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
@@ -795,13 +851,19 @@ struct CaptureState {
     win_size: (i32, i32),
     desktop: DesktopLayout,
     desktop_updated: Instant,
+    pending_screen: Arc<Mutex<Option<ScreenUpdate>>>,
     local_keys: HashSet<u16>,
     pressed_keys: HashSet<u16>,
     pressed_buttons: HashSet<MouseButton>,
 }
 
 impl CaptureState {
-    fn new(input: InputEmitter, edge: Edge, remote_size: (i32, i32)) -> Self {
+    fn new(
+        input: InputEmitter,
+        edge: Edge,
+        remote_size: (i32, i32),
+        pending_screen: Arc<Mutex<Option<ScreenUpdate>>>,
+    ) -> Self {
         let desktop = desktop_layout();
         let win_size = desktop.size();
         Self {
@@ -810,10 +872,43 @@ impl CaptureState {
             win_size,
             desktop,
             desktop_updated: Instant::now(),
+            pending_screen,
             local_keys: HashSet::new(),
             pressed_keys: HashSet::new(),
             pressed_buttons: HashSet::new(),
         }
+    }
+
+    fn apply_pending_screen(&mut self) {
+        let update = self.pending_screen.lock().unwrap().take();
+        if let Some(update) = update {
+            self.deactivate();
+            self.pointer
+                .update_remote_size((update.width as i32, update.height as i32));
+            // This must use the same FIFO as all prior input, including key and
+            // button releases. Send the fence even when control was already local.
+            self.send_input(InputEvent::ScreenSync {
+                revision: update.revision,
+            });
+        }
+    }
+
+    fn refresh_desktop(&mut self, force: bool) -> bool {
+        if !force && self.desktop_updated.elapsed() < Duration::from_secs(1) {
+            return false;
+        }
+        self.desktop_updated = Instant::now();
+        let Some(desktop) = sample_desktop_layout() else {
+            return false;
+        };
+        if desktop == self.desktop {
+            return false;
+        }
+        self.deactivate();
+        self.win_size = desktop.size();
+        self.pointer.update_local_size(self.win_size);
+        self.desktop = desktop;
+        true
     }
 
     fn handle_keyboard(&mut self, message: u32, hook: &KBDLLHOOKSTRUCT) -> bool {
@@ -878,6 +973,9 @@ impl CaptureState {
     }
 
     fn handle_mouse_move(&mut self, hook: &MSLLHOOKSTRUCT) -> bool {
+        if self.refresh_desktop(false) {
+            return false;
+        }
         if self.pointer.is_remote() {
             if (hook.flags & LLMHF_INJECTED) != 0 {
                 return true;
@@ -888,12 +986,6 @@ impl CaptureState {
 
         if (hook.flags & LLMHF_INJECTED) != 0 {
             return false;
-        }
-        if self.desktop_updated.elapsed() >= Duration::from_secs(1) {
-            self.desktop = desktop_layout();
-            self.win_size = self.desktop.size();
-            self.pointer.update_local_size(self.win_size);
-            self.desktop_updated = Instant::now();
         }
         let (local_x, local_y) = self.desktop.local_point(hook.pt.x, hook.pt.y);
         if !self.local_keys.is_empty() {
@@ -911,6 +1003,9 @@ impl CaptureState {
     }
 
     fn handle_raw_mouse_delta(&mut self, dx: i32, dy: i32) {
+        if self.refresh_desktop(false) {
+            return;
+        }
         if !self.pointer.is_remote() {
             // Windows clamps pixel coordinates at an edge. Raw motion still
             // reports an outward push, including after releasing a held key.
@@ -1027,13 +1122,13 @@ impl CaptureState {
         self.send_input(InputEvent::MouseButton { button, down });
     }
 
-    fn shutdown(&mut self) {
+    fn shutdown(&mut self) -> Option<thread::JoinHandle<()>> {
         if self.pointer.is_remote() {
             self.deactivate();
         } else {
             unlock_cursor();
         }
-        self.input.stop();
+        self.input.close_worker()
     }
 
     fn send_wheel(&self, horizontal: i16, vertical: i16) {
@@ -1079,10 +1174,13 @@ impl InputEmitter {
             connection_lost();
         }
     }
-    fn stop(&mut self) {
+    fn close_worker(&mut self) -> Option<thread::JoinHandle<()>> {
         self.queue.close();
         let _ = self.wake.signal();
-        if let Some(worker) = self.worker.take() {
+        self.worker.take()
+    }
+    fn stop(&mut self) {
+        if let Some(worker) = self.close_worker() {
             let _ = worker.join();
         }
     }
@@ -1325,6 +1423,18 @@ fn last_os_error(context: &str) -> std::io::Error {
 }
 
 fn desktop_layout() -> DesktopLayout {
+    sample_desktop_layout().unwrap_or_else(|| {
+        let (width, height) = screen_size();
+        DesktopLayout::new(vec![MonitorRect {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        }])
+    })
+}
+
+fn sample_desktop_layout() -> Option<DesktopLayout> {
     unsafe extern "system" fn collect(
         _monitor: HMONITOR,
         _dc: HDC,
@@ -1344,29 +1454,89 @@ fn desktop_layout() -> DesktopLayout {
         1
     }
     let mut monitors = Vec::<MonitorRect>::new();
-    unsafe {
+    let ok = unsafe {
         EnumDisplayMonitors(
             ptr::null_mut(),
             ptr::null(),
             Some(collect),
             (&mut monitors as *mut Vec<MonitorRect>) as LPARAM,
-        );
+        )
+    };
+    if ok == 0
+        || monitors.is_empty()
+        || monitors
+            .iter()
+            .any(|r| r.right <= r.left || r.bottom <= r.top)
+    {
+        return None;
     }
-    if monitors.is_empty() {
-        let (width, height) = screen_size();
-        monitors.push(MonitorRect {
-            left: 0,
-            top: 0,
-            right: width,
-            bottom: height,
-        });
+    let left = monitors.iter().map(|r| r.left).min()?;
+    let top = monitors.iter().map(|r| r.top).min()?;
+    let right = monitors.iter().map(|r| r.right).max()?;
+    let bottom = monitors.iter().map(|r| r.bottom).max()?;
+    if !(1..=32768).contains(&right.checked_sub(left)?)
+        || !(1..=32768).contains(&bottom.checked_sub(top)?)
+    {
+        return None;
     }
-    DesktopLayout::new(monitors)
+    Some(DesktopLayout::new(monitors))
 }
 
 #[cfg(test)]
 mod control_tests {
     use super::*;
+    #[test]
+    fn screen_update_while_local_queues_fence_behind_existing_input() {
+        // Only a kernel wake event is created. No hooks, cursor movement or
+        // native input injection are used by this queue/capture-state regression.
+        let queue = Arc::new(EventQueue::new(16));
+        let input = InputEmitter {
+            queue: queue.clone(),
+            wake: Arc::new(WinWakeEvent::new().unwrap()),
+            worker: None,
+        };
+        let pending_screen = Arc::new(Mutex::new(Some(ScreenUpdate {
+            revision: 2,
+            width: 1600,
+            height: 1000,
+        })));
+        let mut state = CaptureState {
+            input,
+            pointer: PointerRouter::new(Edge::Both, (1000, 800), (1200, 900)),
+            win_size: (1000, 800),
+            desktop: DesktopLayout::new(vec![MonitorRect {
+                left: 0,
+                top: 0,
+                right: 1000,
+                bottom: 800,
+            }]),
+            desktop_updated: Instant::now(),
+            pending_screen: pending_screen.clone(),
+            local_keys: HashSet::new(),
+            pressed_keys: HashSet::new(),
+            pressed_buttons: HashSet::new(),
+        };
+        let previous = InputEvent::Key {
+            scancode: 30,
+            state: KeyState::Up,
+        };
+        state.send_input(previous.clone());
+        state.apply_pending_screen();
+        assert_eq!(queue.try_pop().unwrap().event, previous);
+        assert_eq!(
+            queue.try_pop().unwrap().event,
+            InputEvent::ScreenSync { revision: 2 }
+        );
+        assert!(queue.try_pop().is_none());
+        assert!(pending_screen.lock().unwrap().is_none());
+        assert_eq!(
+            state.pointer.observe_local_motion(999, 799),
+            MotionAction::EnterRemote { x: 8, y: 999 }
+        );
+        // Avoid calling native activation/deactivation; the router alone is
+        // sufficient to prove that the queued fence accompanies new bounds.
+    }
+
     #[test]
     fn native_hook_registration_and_hidden_window_cleanup_work() {
         // No capture state is installed in this test: callbacks pass all user

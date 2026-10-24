@@ -322,6 +322,7 @@ impl InputSink {
         match event {
             InputEvent::MouseEnter { x, y } => self.mouse_enter(x, y),
             InputEvent::MouseLeave => self.mouse_leave(),
+            InputEvent::ScreenSync { .. } => Ok(()),
             _ if !self.remote_active => Ok(()),
             InputEvent::Key { scancode, state } => self.key(scancode, state),
             InputEvent::MouseDelta { dx, dy } => self.mouse_delta(dx, dy),
@@ -1134,12 +1135,19 @@ fn event_err(message: &str) -> std::io::Error {
 }
 
 pub fn screen_size() -> (u32, u32) {
+    let (width, height) = current_screen_size();
+    (width.max(1), height.max(1))
+}
+
+// Preserve zero/invalid native samples for the live geometry validator. The
+// startup fallback above must not turn a transient missing display into 1×1.
+pub fn current_screen_size() -> (u32, u32) {
     let mut width = 0u32;
     let mut height = 0u32;
     unsafe {
         deskbridge_main_display_size(&mut width, &mut height);
     }
-    (width.max(1), height.max(1))
+    (width, height)
 }
 
 fn screen_size_i32() -> (i32, i32) {
