@@ -1,5 +1,6 @@
 // CrossDesk image clipboard changes: 2026-10-20 (GPL-3.0-only).
 use crate::secure::SecureStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -19,15 +20,35 @@ const REMOTE_CLIPBOARD_SUPPRESS_WINDOW: Duration = Duration::from_millis(1200);
 const DEFAULT_INPUT_FLUSH_MS: u64 = 4;
 
 fn apply_input_queue(queue: &EventQueue, mut apply: impl FnMut(InputEvent) -> std::io::Result<()>) {
+    drive_input_queue(queue, |event| match event {
+        Some(event) => apply(event),
+        None => Ok(()),
+    });
+}
+
+fn drive_input_queue(
+    queue: &EventQueue,
+    mut step: impl FnMut(Option<InputEvent>) -> std::io::Result<()>,
+) {
     let mut stats = LatencyStats::from_env("receive");
-    while let Some(item) = queue.recv() {
+    while !queue.is_closed() {
+        let Some(item) = queue.recv_timeout(crate::display_sync::POLL_INTERVAL) else {
+            if !queue.is_closed() {
+                if let Err(error) = step(None) {
+                    eprintln!("input synchronization failed: {error}");
+                    queue.close();
+                }
+            }
+            continue;
+        };
         if stats.enabled() {
             stats.record(Stage::ReceiveQueue, item.enqueued.elapsed());
             stats.queue(queue.take_peak_depth(), item.samples);
         }
         let started = stats.enabled().then(Instant::now);
-        if let Err(error) = apply(item.event) {
+        if let Err(error) = step(Some(item.event)) {
             eprintln!("input apply failed: {error}");
+            queue.close();
         }
         if let Some(started) = started {
             stats.record(Stage::Inject, started.elapsed());
@@ -37,6 +58,9 @@ fn apply_input_queue(queue: &EventQueue, mut apply: impl FnMut(InputEvent) -> st
         }
     }
 }
+
+#[cfg(test)]
+mod display_tests;
 
 #[cfg(test)]
 mod input_queue_tests {
@@ -150,12 +174,15 @@ fn run_session(server: &str, key: &[u8; 32]) -> std::io::Result<()> {
     );
 
     eprintln!("initializing local input sink");
-    let (input, (width, height)) = InputApplier::spawn(profile)?;
+    let screen_updates = server_hello.screen_updates && cfg!(any(windows, target_os = "macos"));
+    let (input, (width, height)) =
+        InputApplier::spawn(profile, writer.clone(), stream.try_clone()?, screen_updates)?;
     eprintln!("sending client hello with screen {width}x{height}");
     writer.write(crate::protocol::Frame::new(
         FrameKind::Hello,
         protocol::hello_payload_with_screen(width, height),
     ))?;
+    input.hello_sent.store(true, Ordering::Release);
 
     eprintln!("initializing local clipboard");
     let mut clipboard = Clipboard::new()?;
@@ -218,8 +245,20 @@ fn run_session(server: &str, key: &[u8; 32]) -> std::io::Result<()> {
             }
             FrameKind::Input => {
                 let event = protocol::decode_input(&frame.payload)?;
+                if matches!(event, InputEvent::ScreenSync { .. }) && !screen_updates {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "unnegotiated screen synchronization",
+                    ));
+                }
                 input_log.observe(&event);
                 input.send(event)?;
+            }
+            FrameKind::ScreenUpdate => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "unexpected server screen update",
+                ));
             }
             FrameKind::FileStart => {
                 let (relative, len) = protocol::decode_file_start(&frame.payload)?;
@@ -247,18 +286,47 @@ fn run_session(server: &str, key: &[u8; 32]) -> std::io::Result<()> {
 struct InputApplier {
     queue: Arc<EventQueue>,
     worker: Option<thread::JoinHandle<()>>,
+    hello_sent: Arc<AtomicBool>,
+    stop_stream: SecureStream,
 }
 impl InputApplier {
-    fn spawn(profile: ConnectionProfile) -> std::io::Result<(Self, (u32, u32))> {
+    fn spawn(
+        profile: ConnectionProfile,
+        writer: SharedWriter,
+        stop_stream: SecureStream,
+        screen_updates: bool,
+    ) -> std::io::Result<(Self, (u32, u32))> {
         let queue = Arc::new(EventQueue::new(256));
         let target = queue.clone();
+        let hello_sent = Arc::new(AtomicBool::new(false));
+        let active = hello_sent.clone();
+        let worker_stream = stop_stream.try_clone()?;
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let worker = thread::Builder::new()
             .name("input-apply".into())
             .spawn(move || match InputSink::new(profile) {
                 Ok(mut input) => {
-                    let _ = ready_tx.send(Ok(input.screen_size()));
-                    apply_input_queue(&target, |event| input.apply(event));
+                    let size = input.screen_size();
+                    let mut alignment = crate::display_sync::AlignmentDriver::new(
+                        size,
+                        screen_updates,
+                        Instant::now(),
+                    );
+                    let _ = ready_tx.send(Ok(size));
+                    drive_input_queue(&target, |event| {
+                        let result = alignment.step(
+                            event,
+                            Instant::now(),
+                            active.load(Ordering::Acquire),
+                            crate::input::screen_size,
+                            |event| input.apply(event),
+                            |update| writer.write(update.frame()),
+                        );
+                        if result.is_err() {
+                            let _ = worker_stream.shutdown(std::net::Shutdown::Both);
+                        }
+                        result
+                    });
                     // Dropping InputSink releases all remotely pressed keys/buttons.
                 }
                 Err(error) => {
@@ -281,6 +349,8 @@ impl InputApplier {
             Self {
                 queue,
                 worker: Some(worker),
+                hello_sent,
+                stop_stream,
             },
             size,
         ))
@@ -292,6 +362,7 @@ impl InputApplier {
 impl Drop for InputApplier {
     fn drop(&mut self) {
         self.queue.close();
+        let _ = self.stop_stream.shutdown(std::net::Shutdown::Both);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }

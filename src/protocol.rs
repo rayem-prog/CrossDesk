@@ -48,6 +48,7 @@ pub enum FrameKind {
     DropReject = 35,
     DropCancel = 36,
     DropResult = 37,
+    ScreenUpdate = 38,
 }
 
 impl FrameKind {
@@ -90,6 +91,7 @@ impl FrameKind {
             35 => Ok(Self::DropReject),
             36 => Ok(Self::DropCancel),
             37 => Ok(Self::DropResult),
+            38 => Ok(Self::ScreenUpdate),
 
             _ => Err(invalid("unknown frame kind")),
         }
@@ -138,6 +140,7 @@ pub enum InputEvent {
     MouseDelta { dx: i32, dy: i32 },
     MouseButton { button: MouseButton, down: bool },
     MouseWheel { horizontal: i16, vertical: i16 },
+    ScreenSync { revision: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +153,7 @@ pub struct Hello {
     pub file_clipboard: bool,
     pub text_clipboard: bool,
     pub edge_drop: bool,
+    pub screen_updates: bool,
 }
 
 pub fn read_frame(reader: &mut impl Read) -> std::io::Result<Frame> {
@@ -194,13 +198,17 @@ pub fn hello_payload() -> Vec<u8> {
         u8::from(crate::transport::image_clipboard_enabled())
             | (u8::from(crate::transport::file_clipboard_enabled()) << 1)
             | (u8::from(crate::transport::text_clipboard_enabled()) << 2)
-            | (u8::from(crate::edge_channel::supported()) << 3),
+            | (u8::from(crate::edge_channel::supported()) << 3)
+            | (u8::from(cfg!(windows)) << 4),
     );
     out
 }
 
 pub fn hello_payload_with_screen(width: u32, height: u32) -> Vec<u8> {
     let mut out = hello_payload();
+    if cfg!(any(windows, target_os = "macos")) {
+        out[3] |= 0x10;
+    }
     out.extend_from_slice(&width.to_be_bytes());
     out.extend_from_slice(&height.to_be_bytes());
     out
@@ -250,6 +258,7 @@ pub fn decode_hello(payload: &[u8]) -> std::io::Result<Hello> {
         file_clipboard: version >= 6 && payload.get(3).is_some_and(|v| v & 2 != 0),
         text_clipboard: version >= 7 && payload.get(3).is_some_and(|v| v & 4 != 0),
         edge_drop: version >= 7 && payload.get(3).is_some_and(|v| v & 8 != 0),
+        screen_updates: version >= 7 && payload.get(3).is_some_and(|v| v & 16 != 0),
     })
 }
 
@@ -282,6 +291,10 @@ pub fn encode_input(event: &InputEvent) -> Vec<u8> {
             payload.extend_from_slice(&y.to_be_bytes());
         }
         InputEvent::MouseLeave => payload.push(6),
+        InputEvent::ScreenSync { revision } => {
+            payload.push(7);
+            payload.extend_from_slice(&revision.to_be_bytes());
+        }
         InputEvent::MouseButton { button, down } => {
             payload.push(3);
             payload.push(match button {
@@ -369,6 +382,14 @@ pub fn decode_input(payload: &[u8]) -> std::io::Result<InputEvent> {
         }
         6 if payload.len() == 1 => Ok(InputEvent::MouseLeave),
         6 => Err(invalid("invalid mouse leave event")),
+        7 if payload.len() == 9 => {
+            let revision = u64::from_be_bytes(payload[1..].try_into().unwrap());
+            if revision == 0 {
+                return Err(invalid("zero screen sync revision"));
+            }
+            Ok(InputEvent::ScreenSync { revision })
+        }
+        7 => Err(invalid("invalid screen sync event")),
         _ => Err(invalid("unknown input event kind")),
     }
 }
@@ -556,6 +577,7 @@ mod tests {
                 file_clipboard: false,
                 text_clipboard: false,
                 edge_drop: false,
+                screen_updates: false,
             })
             .is_err()
         );

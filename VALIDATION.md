@@ -1,3 +1,23 @@
+# CrossDesk 0.7.1 validation — 2026-10-24
+
+Automatic coordinate adaptation retains native display modes and the existing proportional vertical edge entry/return. A new negotiated v7 capability (0x10) gates a bounded revisioned ScreenUpdate frame and ordered ScreenSync input fence; Hello lengths remain 4/12. Only supported Windows servers advertise receive support. Legacy v7 peers receive neither new frames nor input tags.
+
+The existing client input worker polls raw native input-coordinate bounds at most every 250 ms, including while idle, and starts feedback only after Hello. A resize releases injected input locally and suppresses stale queued events until the exact latest fence. Rapid resizes cannot be unlocked by an old fence. Missing acknowledgment terminates the session after five seconds; shutdown closes the transport before joining the input worker. Invalid native zero/oversize samples preserve the previous valid bounds instead of becoming 1×1.
+
+Windows validates monotonic updates and places the latest in one bounded slot. Its reader only posts a notification; the owning input/window thread releases remote input, updates router bounds and enqueues the fence behind all earlier input. Local display-change messages and bounded movement sampling refresh its full desktop layout, including origin/topology changes and movement while remote. Worker joins occur outside capture locks. Mac retains CoreGraphics logical input coordinates, including Retina scaling; pointer speed and OS display modes are unchanged.
+
+## Automated evidence
+
+- Codec/gate tests were first observed failing before their implementations; router resize and layout equality regressions likewise failed before implementation. They cover bounded exact frames, malformed/future fences, old-peer flags, unchanged/invalid samples, pre-Hello suppression, poll rate and missing-fence timeout.
+- Real encrypted TCP loopbacks use the production queue/driver/router and a recorded native sink: a held key is released on resize, old queued keys/motion are suppressed, rapid consecutive changes reject stale fences, new edge entry uses new dimensions, and a legacy peer receives no display feedback. They do not inject OS input or touch a clipboard.
+- A Windows-only queue regression exercises capture-state metadata application and verifies old input precedes the fence, without hooks or cursor injection. Windows native execution and package IDs are recorded in delivery evidence.
+- Final local GUI: **269 passed / 5 ignored**; CLI: **204 passed / 3 ignored**; web: **44 passed** and production build passed. Windows test cross-compilation and corresponding-source regression passed. The explicit release 129 MiB stream and native CI/package results are recorded with delivery artifacts. Existing clipboard, folder, edge-drop, input, pairing and reconnect regressions are retained.
+- Focused read-only review found a native sampling issue where old getters clamped zero to one. Live polling now uses separate raw queries while startup fallback remains unchanged. Driver regressions preserve the previous geometry on invalid raw samples.
+
+No live application, display mode, login item or general clipboard is changed by local verification. Native display hot-plug, actual resolution switches during held keys, Finder/Explorer acceptance and physical two-device mouse behavior were not exercised on the user's desktop. These are test packages and a draft PR, not a formal release.
+
+---
+
 # CrossDesk 0.7.0 validation — 2026-10-24
 
 The new screen-edge drop path is independent of general clipboard publication. It scans a bounded source tree once, offers a validated manifest, waits for a destination and explicit consent, then streams encrypted bounded chunks with per-frame acknowledgments and SHA-256. Receive staging belongs to its selected parent; OS-enforced exclusive rename publishes a complete batch without replacement. Failed, cancelled and disconnected active batches remove owned staging. A successful rename remains saved even if a later acknowledgment fails. Windows raw filesystem calls normalize extended-length paths without requiring registry/manifest opt-in; destination failures are reported as failed, separately from explicit rejection. Path and snapshot sizes are bounded before reception.

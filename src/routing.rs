@@ -38,6 +38,12 @@ impl PointerRouter {
 
     pub fn update_local_size(&mut self, size: (i32, i32)) {
         self.local_size = valid_size(size);
+        self.local_pos = bounded_position(self.local_pos, self.local_size);
+    }
+
+    pub fn update_remote_size(&mut self, size: (i32, i32)) {
+        self.remote_size = valid_size(size);
+        self.remote_pos = bounded_position(self.remote_pos, self.remote_size);
     }
 
     pub fn calibrate_local_position(&mut self, x: i32, y: i32) {
@@ -112,7 +118,10 @@ impl PointerRouter {
     }
 }
 
-fn valid_size(size: (i32, i32)) -> (i32, i32) { (size.0.max(1), size.1.max(1)) }
+fn valid_size(size: (i32, i32)) -> (i32, i32) { (size.0.clamp(1, 32768), size.1.clamp(1, 32768)) }
+fn bounded_position(position: (i32, i32), size: (i32, i32)) -> (i32, i32) {
+    (position.0.clamp(0, size.0 - 1), position.1.clamp(0, size.1 - 1))
+}
 fn inset(width: i32) -> i32 { ENTRY_INSET.min((width - 1) / 4) }
 fn scaled(value: i32, from: i32, to: i32) -> i32 {
     if from <= 1 || to <= 1 { return 0; }
@@ -124,6 +133,33 @@ mod tests {
     use super::*;
     fn both() -> PointerRouter { PointerRouter::new(Edge::Both, (1000, 800), (1200, 900)) }
 
+    #[test]
+    fn resizing_remote_preserves_proportional_entry_and_return() {
+        let mut r = both();
+        r.update_remote_size((1600, 1000));
+        assert_eq!(r.observe_local_motion(999, 799), MotionAction::EnterRemote { x: 8, y: 999 });
+        assert_eq!(r.observe_remote_motion(-8, -999, true), MotionAction::ReturnLocal { x: 991, y: 0 });
+    }
+    #[test]
+    fn resizing_local_preserves_proportional_entry_and_return() {
+        let mut r = both();
+        r.update_local_size((2000, 1600));
+        assert_eq!(r.observe_local_motion(1999, 1599), MotionAction::EnterRemote { x: 8, y: 899 });
+        assert_eq!(r.observe_remote_motion(-8, -899, true), MotionAction::ReturnLocal { x: 1991, y: 0 });
+    }
+    #[test]
+    fn resizing_clamps_existing_positions_and_unsafe_dimensions() {
+        let mut r = both();
+        r.observe_local_motion(0, 799);
+        r.update_remote_size((2, 2));
+        assert_eq!(r.remote_pos, (1, 1));
+        r.update_remote_size((i32::MAX, i32::MIN));
+        assert_eq!(r.remote_size, (32768, 1));
+        assert_eq!(r.remote_pos, (1, 0));
+        r.force_local();
+        r.update_local_size((2, 2));
+        assert_eq!(r.local_pos, (1, 0));
+    }
     #[test]
     fn windows_left_enters_mac_right_and_mac_right_returns_windows_left() {
         let mut r = both();

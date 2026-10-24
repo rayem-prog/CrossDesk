@@ -6,7 +6,7 @@ import userEvent from '@testing-library/user-event';
 import {App} from './App.jsx';
 const native=vi.hoisted(()=>({visibility:null}));
 vi.mock('@tauri-apps/api/event',()=>({listen:vi.fn(async(name,handler)=>{native.visibility=handler;return ()=>{native.visibility=null;};})}));
-const base={platform:'macos',state:'connected',devices:[],selectedId:null,error:null,autoConnect:true,textClipboard:true,imageClipboard:true,fileClipboard:true,logs:[],appVersion:'0.6.2',diagnostics:{run_id:null,state:'idle',remaining_seconds:0,report:null}};
+const base={platform:'macos',state:'connected',devices:[],selectedId:null,error:null,autoConnect:true,textClipboard:true,imageClipboard:true,fileClipboard:true,logs:[],appVersion:'0.7.1',diagnostics:{run_id:null,state:'idle',remaining_seconds:0,report:null}};
 function boundary(overrides={}){return vi.fn(async(name,args)=>{if(overrides[name])return overrides[name](args);if(name==='get_desktop_state')return {backgroundAvailable:true,startAtLogin:false,error:null};if(name==='get_connect_state')return structuredClone(base);});}
 afterEach(()=>{cleanup();vi.useRealTimers();Object.defineProperty(document,'hidden',{configurable:true,value:false});});
 test('background action surfaces native failure',async()=>{const api=boundary({hide_to_background:()=>{throw new Error('托盘不可用');}});render(<App api={api}/>);await userEvent.click(await screen.findByRole('button',{name:'后台运行'}));expect(api).toHaveBeenCalledWith('hide_to_background',{});expect((await screen.findByRole('alert')).textContent).toContain('托盘不可用');});
