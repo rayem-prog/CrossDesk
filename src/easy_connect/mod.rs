@@ -38,6 +38,9 @@ pub struct DeviceView {
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectView {
+    pub drop_error: Option<String>,
+    pub drop_edge: String,
+    pub drop: crate::edge_drop::DropView,
     pub platform: String,
     pub state: String,
     pub devices: Vec<DeviceView>,
@@ -59,6 +62,9 @@ pub struct ConnectView {
 impl ConnectView {
     pub fn loading() -> Self {
         Self {
+            drop_error: None,
+            drop_edge: if cfg!(windows) { "right" } else { "left" }.into(),
+            drop: Default::default(),
             platform: crate::platform::Platform::local().as_str().into(),
             state: "starting".into(),
             devices: Vec::new(),
@@ -80,6 +86,12 @@ impl ConnectView {
     }
 }
 pub trait ServiceControl: Send {
+    fn drop_view(&self) -> crate::edge_drop::DropView {
+        Default::default()
+    }
+    fn send_drop_command(&mut self, _: crate::edge_drop::DropCommand) -> io::Result<()> {
+        Ok(())
+    }
     fn diagnostics(&self) -> crate::diagnostics::DiagnosticView {
         Default::default()
     }
@@ -108,6 +120,12 @@ pub trait ServiceControl: Send {
     }
 }
 impl ServiceControl for ProcessBackend {
+    fn drop_view(&self) -> crate::edge_drop::DropView {
+        ProcessBackend::drop_view(self)
+    }
+    fn send_drop_command(&mut self, command: crate::edge_drop::DropCommand) -> io::Result<()> {
+        ProcessBackend::send_drop_command(self, command)
+    }
     fn diagnostics(&self) -> crate::diagnostics::DiagnosticView {
         ProcessBackend::diagnostics(self)
     }
@@ -139,6 +157,8 @@ impl ServiceControl for ProcessBackend {
     }
 }
 pub enum Command {
+    Drop(crate::edge_drop::DropCommand),
+    DropEdge(String),
     Select(DeviceId),
     Pair(String),
     Connect,
@@ -187,6 +207,7 @@ pub struct Core {
     prefs: Preferences,
     phase: ServiceState,
     error: Option<String>,
+    drop_error: Option<String>,
     discovery_error: Option<String>,
     opened: Instant,
     current_address: Option<SocketAddr>,
@@ -200,7 +221,15 @@ impl Core {
         store: Arc<TrustedStore>,
         backend: Box<dyn ServiceControl>,
     ) -> io::Result<Self> {
-        let prefs = Preferences::load(&store)?;
+        let mut prefs = Preferences::load(&store)?;
+        if !matches!(prefs.drop_edge.as_str(), "left" | "right" | "off") {
+            prefs.drop_edge = if platform == "windows" {
+                "right"
+            } else {
+                "left"
+            }
+            .into();
+        }
         let remembered = match store.paired()? {
             Some(p) => Some(p),
             None => store.pending()?,
@@ -223,6 +252,7 @@ impl Core {
             prefs,
             phase: ServiceState::Stopped,
             error: None,
+            drop_error: None,
             discovery_error: None,
             opened: Instant::now(),
             current_address: None,
@@ -426,6 +456,13 @@ impl Core {
                         self.prefs.file_clipboard,
                         self.prefs.text_clipboard,
                     )?;
+                    self.drop_error = self
+                        .backend
+                        .send_drop_command(crate::edge_drop::DropCommand::SetEnabled {
+                            enabled: self.prefs.drop_edge != "off",
+                        })
+                        .err()
+                        .map(|e| e.to_string());
                     self.current_address = Some(address);
                     self.phase = ServiceState::Starting;
                     self.policy.started();
@@ -474,6 +511,10 @@ impl Core {
         }
         let mut view = ConnectView::loading();
         view.platform = self.platform.clone();
+        view.drop_error = self.drop_error.clone();
+        view.drop_edge = self.prefs.drop_edge.clone();
+        view.drop = self.backend.drop_view();
+        view.drop.enabled = self.prefs.drop_edge != "off";
         view.devices = devices;
         view.selected_id = self.selected.map(|id| hex(&id));
         view.auto_connect = self.prefs.auto_connect;
@@ -567,7 +608,46 @@ impl Core {
         self.discovery.take();
     }
     pub fn command(&mut self, command: Command) -> io::Result<bool> {
+        let is_drop = matches!(&command, Command::Drop(_) | Command::DropEdge(_));
+        let result = self.apply_command(command);
+        if is_drop {
+            self.drop_error = result.as_ref().err().map(|e| e.to_string());
+        }
+        result
+    }
+    fn apply_command(&mut self, command: Command) -> io::Result<bool> {
         match command {
+            Command::Drop(command) => {
+                if self.phase != ServiceState::Connected {
+                    return Err(io::Error::other("请先连接设备，再投送文件"));
+                }
+                if self.prefs.drop_edge == "off" {
+                    return Err(io::Error::other("边缘投送已关闭"));
+                }
+                self.backend.send_drop_command(command)?;
+            }
+            Command::DropEdge(edge) => {
+                if !matches!(edge.as_str(), "left" | "right" | "off") {
+                    return Err(io::Error::other("请选择左侧、右侧或关闭"));
+                }
+                let mut prefs = self.prefs.clone();
+                prefs.drop_edge = edge;
+                prefs.save(&self.store)?;
+                self.prefs = prefs;
+                if matches!(
+                    self.phase,
+                    ServiceState::Connected
+                        | ServiceState::Starting
+                        | ServiceState::Connecting
+                        | ServiceState::Listening
+                        | ServiceState::Retrying
+                ) {
+                    self.backend
+                        .send_drop_command(crate::edge_drop::DropCommand::SetEnabled {
+                            enabled: self.prefs.drop_edge != "off",
+                        })?;
+                }
+            }
             Command::Select(id) => {
                 if self
                     .candidates

@@ -1,0 +1,1 @@
+{"identifier":"drop-surfaces","windows":["drop-edge","drop-receive"],"permissions":["core:event:allow-listen","core:event:allow-unlisten"]}

@@ -8,6 +8,7 @@ pub struct Preferences {
     pub file_clipboard: bool,
     pub last_address: Option<SocketAddr>,
     pub peer_name: String,
+    pub drop_edge: String,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -18,6 +19,7 @@ impl Default for Preferences {
             file_clipboard: true,
             last_address: None,
             peer_name: String::new(),
+            drop_edge: String::new(),
         }
     }
 }

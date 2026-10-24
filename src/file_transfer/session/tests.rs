@@ -424,7 +424,73 @@ fn offsets_serials_and_extra_data_are_rejected_before_publication() {
     }
 }
 
+// The file-only harness still shares production's 5-second transport liveness.
+// Independent marked Ping/Pong frames model the outer connection heartbeat without
+// changing the explicit Input/Ping counters used by existing ordering tests.
+const TEST_HEARTBEAT: &[u8] = b"file-session-test-heartbeat";
+struct TestHeartbeat {
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+impl TestHeartbeat {
+    fn start(writer: SharedWriter) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let cancel = stop.clone();
+        let worker = thread::spawn(move || {
+            loop {
+                for _ in 0..10 {
+                    if cancel.load(Ordering::Acquire) {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                if cancel.load(Ordering::Acquire)
+                    || writer
+                        .write(Frame::new(FrameKind::Ping, TEST_HEARTBEAT.to_vec()))
+                        .is_err()
+                {
+                    return;
+                }
+            }
+        });
+        Self {
+            stop,
+            worker: Some(worker),
+        }
+    }
+    fn join(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            worker.join().unwrap();
+        }
+    }
+}
+impl Drop for TestHeartbeat {
+    fn drop(&mut self) {
+        self.join();
+    }
+}
+fn automatic_heartbeat(frame: &Frame, writer: &SharedWriter) -> io::Result<bool> {
+    if frame.payload != TEST_HEARTBEAT || !matches!(frame.kind, FrameKind::Ping | FrameKind::Pong) {
+        return Ok(false);
+    }
+    if frame.kind == FrameKind::Ping {
+        writer.write(Frame::new(FrameKind::Pong, frame.payload.clone()))?;
+    }
+    Ok(true)
+}
+
+#[derive(Debug)]
+struct ReaderExit {
+    kind: io::ErrorKind,
+    detail: String,
+    last_frame: Option<FrameKind>,
+    waiting_serial: Option<u64>,
+    read_elapsed: Duration,
+}
 struct Endpoint {
+    heartbeat: TestHeartbeat,
+    reader_exit: mpsc::Receiver<ReaderExit>,
     sender: FileSender,
     done: mpsc::Receiver<CompletedBatch>,
     socket: crate::secure::SecureStream,
@@ -433,25 +499,62 @@ struct Endpoint {
 }
 impl Drop for Endpoint {
     fn drop(&mut self) {
+        self.heartbeat.stop.store(true, Ordering::Release);
         let _ = self.socket.shutdown(std::net::Shutdown::Both);
         if let Some(t) = self.reader.take() {
             t.join().unwrap();
         }
+        self.heartbeat.join();
     }
 }
 fn endpoint(mut stream: crate::secure::SecureStream, root: PathBuf) -> Endpoint {
     let socket = stream.try_clone().unwrap();
     let writer = SharedWriter::new(stream.try_clone().unwrap());
     let (tx, done) = mpsc::channel();
-    let session = FileSession::start(writer, root, move |b| {
+    let heartbeat = TestHeartbeat::start(writer.clone());
+    let heartbeat_stop = heartbeat.stop.clone();
+    let session = FileSession::start(writer.clone(), root, move |b| {
         tx.send(b).unwrap();
     })
     .unwrap();
     let sender = session.sender.clone();
     let input = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counter = input.clone();
+    let (exit, reader_exit) = mpsc::channel();
     let reader = thread::spawn(move || {
-        while let Ok(frame) = crate::protocol::read_frame(&mut stream) {
+        let mut last_frame = None;
+        loop {
+            let started = Instant::now();
+            let frame = match crate::protocol::read_frame(&mut stream) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    let failure = ReaderExit {
+                        kind: error.kind(),
+                        detail: error.to_string(),
+                        last_frame,
+                        waiting_serial: session
+                            .sender
+                            .shared
+                            .replies
+                            .lock()
+                            .unwrap()
+                            .expected
+                            .map(|(_, serial)| serial),
+                        read_elapsed: started.elapsed(),
+                    };
+                    if !heartbeat_stop.load(Ordering::Acquire) {
+                        eprintln!("file test endpoint reader stopped: {failure:?}");
+                    }
+                    let _ = exit.send(failure);
+                    break;
+                }
+            };
+            last_frame = Some(frame.kind);
+            match automatic_heartbeat(&frame, &writer) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(_) => break,
+            }
             if matches!(
                 frame.kind,
                 FrameKind::Input | FrameKind::Ping | FrameKind::Pong
@@ -461,8 +564,11 @@ fn endpoint(mut stream: crate::secure::SecureStream, root: PathBuf) -> Endpoint 
                 session.receive(frame, 77).unwrap();
             }
         }
+        heartbeat_stop.store(true, Ordering::Release);
     });
     Endpoint {
+        heartbeat,
+        reader_exit,
         sender,
         done,
         socket,
@@ -696,4 +802,87 @@ fn a_stopped_session_cannot_write_a_new_offer_through_a_retained_sender() {
     );
     drop(session);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+// A receiver's disk work can delay FileSeal credit beyond transport liveness.
+// Independent connection heartbeats must keep that healthy transfer alive.
+#[test]
+fn independent_heartbeats_keep_delayed_seal_credit_alive() {
+    let root = root("delayed-seal-heartbeat");
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("one-chunk.bin");
+    std::fs::write(&source, b"one chunk").unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let received_root = root.join("right");
+    let (seal_tx, seal_rx) = mpsc::sync_channel(1);
+    let (published_tx, published_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let peer = thread::spawn(move || {
+        let mut stream =
+            crate::secure::SecureStream::accept(listener.accept().unwrap().0, &[56; 32]).unwrap();
+        let writer = SharedWriter::new(stream.try_clone().unwrap());
+        let _heartbeat = TestHeartbeat::start(writer.clone());
+        let mut receiver = Receiver::new(received_root);
+        while let Ok(frame) = crate::protocol::read_frame(&mut stream) {
+            match automatic_heartbeat(&frame, &writer) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(_) => break,
+            }
+            let sealed = frame.kind == FrameKind::FileSeal;
+            let (id, serial) = wire::identity(&frame).unwrap();
+            let batch = receiver.handle(frame, 77).unwrap();
+            if sealed {
+                seal_tx.send((serial, Instant::now())).unwrap();
+                thread::sleep(crate::secure::LIVENESS_TIMEOUT + Duration::from_millis(250));
+            }
+            if writer
+                .write(wire::ack(id, serial, u8::from(batch.is_some())))
+                .is_err()
+            {
+                break;
+            }
+            if let Some(batch) = batch {
+                published_tx.send(batch).unwrap();
+                // Keep the connection alive until sender consumes final credit.
+                let _ = release_rx.recv_timeout(Duration::from_secs(3));
+                break;
+            }
+        }
+    });
+    let stream = crate::secure::SecureStream::connect(&address, &[56; 32]).unwrap();
+    let endpoint = endpoint(stream, root.join("left"));
+    let result = endpoint.sender.send(&[source], || false);
+    let (serial, delayed) = seal_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let batch = if result.is_ok() {
+        Some(published_rx.recv_timeout(Duration::from_secs(3)).unwrap())
+    } else {
+        let _ = endpoint.socket.shutdown(std::net::Shutdown::Both);
+        None
+    };
+    let reader_failure = endpoint.reader_exit.try_recv().ok();
+    let counted_input = endpoint.input.load(Ordering::Acquire);
+    let _ = release_tx.send(());
+    peer.join().unwrap();
+    if let Some(batch) = &batch {
+        assert_eq!(std::fs::read(&batch.files[0]).unwrap(), b"one chunk");
+    }
+    drop(batch);
+    drop(endpoint);
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(
+        result.is_ok(),
+        "delayed healthy transfer failed: {result:?}; reader={reader_failure:?}"
+    );
+    assert_eq!(
+        counted_input, 0,
+        "automatic heartbeats must not count as explicit input/Ping frames"
+    );
+    assert_eq!(serial, 2, "one chunk's seal follows offer and data credit");
+    assert!(delayed.elapsed() >= crate::secure::LIVENESS_TIMEOUT + Duration::from_millis(250));
+    assert!(
+        reader_failure.is_none(),
+        "reader exited during healthy delayed credit: {reader_failure:?}"
+    );
 }

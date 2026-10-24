@@ -1,6 +1,6 @@
 [package]
 name = "crossdesk"
-version = "0.6.2"
+version = "0.7.0"
 edition = "2024"
 license = "GPL-3.0-only"
 
@@ -27,6 +27,7 @@ getrandom = "0.2"
 ctrlc = { version = "3.4", features = ["termination"] }
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }
 sha2 = "0.10"
+subtle = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"

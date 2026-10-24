@@ -1,6 +1,9 @@
 // CrossDesk simple desktop flow, 2026-10-21 (GPL-3.0-only).
 use crate::easy_connect::{Command, ConnectView, Controller};
 use crate::trust_store::parse_id;
+mod drop_policy;
+mod drop_windows;
+use drop_windows::*;
 use std::sync::Mutex;
 use std::{
     path::PathBuf,
@@ -96,23 +99,46 @@ pub fn run() -> std::io::Result<()> {
             } else if let Some(window) = app.get_webview_window("main") {
                 let _ = window.hide();
             }
+            if let Err(error) = drop_windows::start(app.handle()) {
+                for label in ["drop-edge", "drop-receive"] {
+                    if let Some(window) = app.get_webview_window(label) {
+                        let _ = window.destroy();
+                    }
+                }
+                *app.state::<ResidentState>().error.lock().unwrap() =
+                    Some(format!("无法创建投送窗口：{error}"));
+                show_main(app.handle());
+            }
             monitor_desktop(app.handle().clone(), background);
             Ok(())
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                window.app_handle().exit(0);
-            } else if matches!(
-                event,
-                tauri::WindowEvent::Focused(_) | tauri::WindowEvent::Resized(_)
-            ) {
+                if window.label() == "main" {
+                    window.app_handle().exit(0);
+                } else {
+                    drop_windows::on_close(window);
+                }
+            } else if window.label() == "main"
+                && matches!(
+                    event,
+                    tauri::WindowEvent::Focused(_) | tauri::WindowEvent::Resized(_)
+                )
+            {
                 let visible =
                     window.is_visible().unwrap_or(true) && !window.is_minimized().unwrap_or(false);
                 let _ = window.emit("crossdesk-visibility", visible);
             }
         })
         .invoke_handler(tauri::generate_handler![
+            get_drop_state,
+            set_drop_edge,
+            accept_drop,
+            reject_drop,
+            cancel_drop,
+            open_drop_result,
+            dismiss_drop,
             get_connect_state,
             select_device,
             pair_device,

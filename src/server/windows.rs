@@ -99,46 +99,38 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
         config.edge.as_str()
     );
     eprintln!("Waiting for the Mac with the matching pairing key. Ctrl+C exits.");
+    let hub = crate::edge_channel::ServerHub::default();
+    let acceptor = crate::edge_channel::Acceptor::start(listener, key, hub.clone())?;
     while !crate::shutdown::requested() {
         crate::service_event::emit(crate::service_event::ServiceState::Listening, None);
-        let (socket, address) = match listener.accept() {
-            Ok(peer) => peer,
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(100));
-                continue;
-            }
-            Err(error) => return Err(error),
+        let Some(peer) = acceptor.next()? else {
+            continue;
         };
-        let mut stream = match SecureStream::accept(socket, &key) {
-            Ok(stream) => stream,
-            Err(error) => {
-                eprintln!("Rejected connection from {address}: {error}");
-                continue;
-            }
-        };
-        let writer = SharedWriter::new(stream.try_clone()?);
-        let hello = writer.write(Frame::new(FrameKind::Hello, protocol::hello_payload()));
-        let peer = hello.and_then(|_| read_client_hello(&mut stream));
-        match peer {
-            Ok((remote_size, platform, images_enabled, files_enabled, texts_enabled)) => {
-                if let Err(error) = run_session(
-                    &config,
-                    stream,
-                    address,
-                    writer,
-                    remote_size,
-                    platform,
-                    images_enabled,
-                    files_enabled,
-                    texts_enabled,
-                ) {
-                    eprintln!("Session ended: {error}");
-                }
-                if !crate::shutdown::requested() {
-                    eprintln!("Windows control restored. Waiting for Mac to reconnect.");
-                }
-            }
-            Err(error) => eprintln!("Mac handshake incomplete: {error}"),
+        let hello = peer.hello;
+        let width = hello.screen_width.unwrap_or(0);
+        let height = hello.screen_height.unwrap_or(0);
+        if !(1..=32768).contains(&width) || !(1..=32768).contains(&height) {
+            continue;
+        }
+        let writer = SharedWriter::new(peer.stream.try_clone()?);
+        let _edge_session = hub.begin(writer.clone(), hello.edge_drop)?;
+        if let Err(error) = run_session(
+            &config,
+            peer.stream,
+            peer.address,
+            writer,
+            (width as i32, height as i32),
+            hello.platform,
+            hello.image_clipboard && crate::transport::image_clipboard_enabled(),
+            hello.file_clipboard && crate::transport::file_clipboard_enabled(),
+            hello.text_clipboard && crate::transport::text_clipboard_enabled(),
+            hub.clone(),
+            hello.edge_drop,
+        ) {
+            eprintln!("Session ended: {error}");
+        }
+        if !crate::shutdown::requested() {
+            eprintln!("Windows control restored. Waiting for Mac to reconnect.");
         }
     }
     Ok(())
@@ -154,6 +146,8 @@ fn run_session(
     images_enabled: bool,
     files_enabled: bool,
     texts_enabled: bool,
+    edge_hub: crate::edge_channel::ServerHub,
+    edge_supported: bool,
 ) -> std::io::Result<()> {
     let _transport = crate::shutdown::register_transport(&stream)?;
     let _diagnostic_session = crate::diagnostics::begin_session();
@@ -198,14 +192,17 @@ fn run_session(
         images_enabled,
         files_enabled,
         texts_enabled,
+        edge_hub.clone(),
     );
     let ping_writer = writer.clone();
+    let heartbeat_hub = edge_hub.clone();
     let heartbeat = thread::spawn(move || {
         while CONNECTION_ALIVE.load(Ordering::Acquire) {
             if ping_writer
                 .write(Frame::new(FrameKind::Ping, Vec::new()))
                 .is_err()
             {
+                heartbeat_hub.invalidate();
                 connection_lost();
                 break;
             }
@@ -226,7 +223,14 @@ fn run_session(
         eprintln!("file drop strip active on the {:?} edge", config.edge);
     }
     crate::service_event::emit(crate::service_event::ServiceState::Connected, None);
+    crate::edge_drop::primary_connected(edge_supported);
+    if edge_supported {
+        if let Err(error) = edge_hub.ticket() {
+            eprintln!("edge ticket unavailable: {error}");
+        }
+    }
     message_loop();
+    edge_hub.invalidate();
     CONNECTION_ALIVE.store(false, Ordering::Release);
     STOP_WINDOW.store(0, Ordering::Release);
     let _ = stop_stream.shutdown(Shutdown::Both);
@@ -243,35 +247,6 @@ fn run_session(
     Ok(())
 }
 
-fn read_client_hello(
-    stream: &mut SecureStream,
-) -> std::io::Result<((i32, i32), Platform, bool, bool, bool)> {
-    let frame = protocol::read_frame(stream)?;
-    if frame.kind != FrameKind::Hello {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "client must send Hello before input capture starts",
-        ));
-    }
-    let hello = protocol::decode_hello(&frame.payload)?;
-    protocol::validate_version(hello)?;
-    let width = hello.screen_width.unwrap_or(0);
-    let height = hello.screen_height.unwrap_or(0);
-    if !(1..=32768).contains(&width) || !(1..=32768).contains(&height) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "invalid remote screen dimensions",
-        ));
-    }
-    Ok((
-        (width as i32, height as i32),
-        hello.platform,
-        hello.image_clipboard && crate::transport::image_clipboard_enabled(),
-        hello.file_clipboard && crate::transport::file_clipboard_enabled(),
-        hello.text_clipboard && crate::transport::text_clipboard_enabled(),
-    ))
-}
-
 fn spawn_inbound_reader(
     mut stream: SecureStream,
     clipboard_state: Arc<Mutex<ClipboardSyncState>>,
@@ -279,8 +254,16 @@ fn spawn_inbound_reader(
     images_enabled: bool,
     files_enabled: bool,
     texts_enabled: bool,
+    edge_hub: crate::edge_channel::ServerHub,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
+        struct Invalidate(crate::edge_channel::ServerHub);
+        impl Drop for Invalidate {
+            fn drop(&mut self) {
+                self.0.invalidate();
+            }
+        }
+        let _invalidate = Invalidate(edge_hub.clone());
         let mut images =
             match ClipboardSession::start(writer, images_enabled, files_enabled, texts_enabled) {
                 Ok(images) => images,
@@ -310,6 +293,12 @@ fn spawn_inbound_reader(
                     break;
                 }
             };
+            if frame.kind == FrameKind::DropTicket {
+                if frame.payload.is_empty() {
+                    let _ = edge_hub.ticket();
+                }
+                continue;
+            }
             if ClipboardSession::handles(frame.kind) {
                 if let Err(error) = images.receive(frame) {
                     eprintln!("clipboard transfer rejected: {error}");

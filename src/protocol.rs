@@ -38,6 +38,16 @@ pub enum FrameKind {
     TextChunk = 25,
     TextEnd = 26,
     TextCancel = 27,
+    DropTicket = 28,
+    DropAttach = 29,
+    DropAttachAck = 30,
+    DropStatus = 31,
+    DropOffer = 32,
+    DropManifest = 33,
+    DropAccept = 34,
+    DropReject = 35,
+    DropCancel = 36,
+    DropResult = 37,
 }
 
 impl FrameKind {
@@ -70,6 +80,17 @@ impl FrameKind {
             25 => Ok(Self::TextChunk),
             26 => Ok(Self::TextEnd),
             27 => Ok(Self::TextCancel),
+            28 => Ok(Self::DropTicket),
+            29 => Ok(Self::DropAttach),
+            30 => Ok(Self::DropAttachAck),
+            31 => Ok(Self::DropStatus),
+            32 => Ok(Self::DropOffer),
+            33 => Ok(Self::DropManifest),
+            34 => Ok(Self::DropAccept),
+            35 => Ok(Self::DropReject),
+            36 => Ok(Self::DropCancel),
+            37 => Ok(Self::DropResult),
+
             _ => Err(invalid("unknown frame kind")),
         }
     }
@@ -128,6 +149,7 @@ pub struct Hello {
     pub image_clipboard: bool,
     pub file_clipboard: bool,
     pub text_clipboard: bool,
+    pub edge_drop: bool,
 }
 
 pub fn read_frame(reader: &mut impl Read) -> std::io::Result<Frame> {
@@ -171,7 +193,8 @@ pub fn hello_payload() -> Vec<u8> {
     out.push(
         u8::from(crate::transport::image_clipboard_enabled())
             | (u8::from(crate::transport::file_clipboard_enabled()) << 1)
-            | (u8::from(crate::transport::text_clipboard_enabled()) << 2),
+            | (u8::from(crate::transport::text_clipboard_enabled()) << 2)
+            | (u8::from(crate::edge_channel::supported()) << 3),
     );
     out
 }
@@ -226,6 +249,7 @@ pub fn decode_hello(payload: &[u8]) -> std::io::Result<Hello> {
         image_clipboard: version >= 5 && payload.get(3).is_some_and(|v| v & 1 != 0),
         file_clipboard: version >= 6 && payload.get(3).is_some_and(|v| v & 2 != 0),
         text_clipboard: version >= 7 && payload.get(3).is_some_and(|v| v & 4 != 0),
+        edge_drop: version >= 7 && payload.get(3).is_some_and(|v| v & 8 != 0),
     })
 }
 
@@ -453,6 +477,19 @@ fn invalid_owned(message: String) -> std::io::Error {
 mod tests {
     use super::*;
     #[test]
+    fn edge_capability_preserves_v7_screen_and_old_peer_defaults() {
+        let hello = decode_hello(&[0, 7, 2, 8, 0, 0, 5, 232, 0, 0, 3, 214]).unwrap();
+        assert!(hello.edge_drop);
+        assert_eq!(hello.screen_width, Some(1512));
+        assert!(!decode_hello(&[0, 7, 2, 7]).unwrap().edge_drop);
+        for byte in 28..=37 {
+            let mut wire = vec![byte];
+            wire.extend_from_slice(&0u64.to_be_bytes());
+            assert!(read_frame(&mut &wire[..]).is_ok());
+        }
+    }
+
+    #[test]
     fn v7_hello_decodes_capabilities_without_shifting_screen_dimensions() {
         let hello = decode_hello(&[0, 7, 2, 3, 0, 0, 5, 232, 0, 0, 3, 214]).unwrap();
         assert!(hello.image_clipboard && hello.file_clipboard);
@@ -518,6 +555,7 @@ mod tests {
                 image_clipboard: false,
                 file_clipboard: false,
                 text_clipboard: false,
+                edge_drop: false,
             })
             .is_err()
         );

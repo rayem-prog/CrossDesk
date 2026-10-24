@@ -42,6 +42,9 @@ jobs:
       - name: Native Windows clipboard on disposable runner
         if: runner.os == 'Windows'
         run: cargo test --locked --features gui native_windows_image_and_file_clipboard_round_trip -- --ignored
+      - name: Edge drop keeps Windows clipboard intact
+        if: runner.os == 'Windows'
+        run: cargo test --locked --features gui native_edge_drop_preserves_windows_clipboard -- --ignored
       - name: Large encrypted file transfer
         run: cargo test --release --locked --features gui large_file_stream_exceeds_image_batch_limit_without_buffering_the_file -- --ignored
       - name: Build native app or installer
