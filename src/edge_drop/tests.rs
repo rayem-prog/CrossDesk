@@ -511,3 +511,142 @@ fn escaped_destination_must_fit_snapshot_budget() {
     assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     assert!(error.to_string().contains("路径过长"));
 }
+// Raw unprefixed Win32 calls reject staging paths after std has successfully created them.
+// Run natively on the Windows CLI CI job; it needs no GUI, clipboard or registry opt-in.
+#[cfg(windows)]
+#[test]
+fn windows_long_parent_supports_hidden_staging_publication_collision_and_cancel() {
+    use std::os::windows::{ffi::OsStrExt, fs::MetadataExt};
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_HIDDEN;
+    let t = Temp::new();
+    let mut destination = t.0.clone();
+    while destination.as_os_str().encode_wide().count() < 235 {
+        destination.push("long-parent-segment");
+    }
+    fs::create_dir_all(&destination).unwrap();
+    let mut incoming = Incoming::default();
+    let manifest = offer();
+    for f in offer_frames(&manifest) {
+        incoming.metadata(f).unwrap();
+    }
+    incoming
+        .accept(&destination)
+        .expect("std-created long staging must be accepted by native attribute APIs");
+    let staging = fs::read_dir(&destination)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(staging.as_os_str().encode_wide().count() > 260);
+    assert_ne!(
+        fs::metadata(&staging).unwrap().file_attributes() & FILE_ATTRIBUTE_HIDDEN,
+        0
+    );
+    incoming
+        .data(wire::request(
+            FrameKind::FileData,
+            manifest.id,
+            0,
+            0,
+            0,
+            b"hello",
+        ))
+        .unwrap();
+    incoming
+        .data(wire::request(
+            FrameKind::FileSeal,
+            manifest.id,
+            1,
+            0,
+            0,
+            &Sha256::digest(b"hello"),
+        ))
+        .unwrap();
+    let saved = incoming
+        .data(wire::request(
+            FrameKind::FileCommit,
+            manifest.id,
+            2,
+            0,
+            0,
+            &[],
+        ))
+        .unwrap()
+        .unwrap();
+    assert_eq!(fs::read(saved.join("hello.txt")).unwrap(), b"hello");
+    assert_eq!(
+        fs::metadata(&saved).unwrap().file_attributes() & FILE_ATTRIBUTE_HIDDEN,
+        0
+    );
+    assert!(!staging.exists());
+    let source = destination.join("existing-source-directory");
+    let target = destination.join("existing-target-directory");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&target).unwrap();
+    fs::write(target.join("sentinel"), b"untouched").unwrap();
+    assert!(rename_exclusive(&source, &target).is_err());
+    assert!(source.is_dir());
+    assert_eq!(fs::read(target.join("sentinel")).unwrap(), b"untouched");
+    let count = fs::read_dir(&destination).unwrap().count();
+    let mut partial = Incoming::default();
+    for f in offer_frames(&manifest) {
+        partial.metadata(f).unwrap();
+    }
+    partial.accept(&destination).unwrap();
+    partial
+        .data(wire::request(
+            FrameKind::FileData,
+            manifest.id,
+            0,
+            0,
+            0,
+            b"he",
+        ))
+        .unwrap();
+    assert_eq!(fs::read_dir(&destination).unwrap().count(), count + 1);
+    drop(partial);
+    assert_eq!(fs::read_dir(&destination).unwrap().count(), count);
+    assert_eq!(fs::read(saved.join("hello.txt")).unwrap(), b"hello");
+}
+#[cfg(windows)]
+#[test]
+fn windows_native_path_rejects_embedded_nul_before_filesystem_access() {
+    use std::os::windows::ffi::OsStringExt;
+    let path = PathBuf::from(std::ffi::OsString::from_wide(&[67, 58, 92, 120, 0, 121]));
+    let error = crate::file_transfer::windows_native_path(&path).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+}
+// A local filesystem failure is distinct from the user explicitly declining the offer.
+#[test]
+fn destination_failure_reports_failed_result_to_sender_without_staging() {
+    let _guard = global_guard();
+    let (a, mut b) = encrypted_pair();
+    let t = Temp::new();
+    let mut lane = test_lane(a);
+    let manifest = offer();
+    for frame in offer_frames(&manifest) {
+        lane.incoming.metadata(frame).unwrap();
+    }
+    let was_enabled = enabled();
+    update(|view| {
+        view.enabled = true;
+        view.incoming = Some(transfer(&manifest, "waiting"));
+    });
+    let result = lane.handle_command(DropCommand::Accept {
+        id: hex(&manifest.id),
+        directory: t.0.join("x".repeat(4097)),
+    });
+    update(|view| view.enabled = was_enabled);
+    assert!(result.is_err());
+    let reply = protocol::read_frame(&mut b).unwrap();
+    assert_eq!(reply.kind, FrameKind::DropResult);
+    assert_eq!(reply.payload.len(), 17);
+    assert_eq!(&reply.payload[..16], &manifest.id);
+    assert_eq!(reply.payload[16], 1);
+    let local = view().incoming.unwrap();
+    assert_eq!(local.state, "failed");
+    assert!(local.message.unwrap().contains("路径过长"));
+    assert_eq!(fs::read_dir(&t.0).unwrap().count(), 0);
+    assert!(lane.incoming.offer.is_none());
+}

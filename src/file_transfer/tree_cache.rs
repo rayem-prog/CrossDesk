@@ -49,11 +49,10 @@ fn create_file(path: &Path) -> io::Result<File> {
 pub(crate) fn set_hidden(path: &Path, hidden: bool) -> io::Result<()> {
     #[cfg(windows)]
     {
-        use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Storage::FileSystem::{
             FILE_ATTRIBUTE_HIDDEN, GetFileAttributesW, INVALID_FILE_ATTRIBUTES, SetFileAttributesW,
         };
-        let p: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let p = super::windows_native_path(path)?;
         let attrs = unsafe { GetFileAttributesW(p.as_ptr()) };
         if attrs == INVALID_FILE_ATTRIBUTES {
             return Err(io::Error::last_os_error());

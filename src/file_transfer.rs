@@ -17,6 +17,34 @@ pub fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
+/// Build a Win32 extended-length path without resolving the final component.
+/// The parent already exists for staging, attributes, and exclusive publication.
+#[cfg(windows)]
+pub(crate) fn windows_native_path(path: &Path) -> io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    if path.as_os_str().encode_wide().any(|unit| unit == 0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path contains NUL",
+        ));
+    }
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "native path must be absolute",
+        ));
+    }
+    let normalized = match (path.parent(), path.file_name()) {
+        (Some(parent), Some(leaf)) => fs::canonicalize(parent)?.join(leaf),
+        _ => fs::canonicalize(path)?,
+    };
+    Ok(normalized
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect())
+}
+
 pub fn safe_name(name: &str) -> bool {
     if name.is_empty()
         || name == "."

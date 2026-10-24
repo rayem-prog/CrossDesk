@@ -627,7 +627,10 @@ impl Lane {
                 let batch = offer.id;
                 if let Err(e) = self.incoming.accept(&directory) {
                     self.fail(false, "failed", friendly(&e));
-                    self.writer.write(control(FrameKind::DropReject, batch))?;
+                    let mut payload = batch.to_vec();
+                    payload.push(1);
+                    self.writer
+                        .write(Frame::new(FrameKind::DropResult, payload))?;
                     return Err(e);
                 }
                 self.publish(false, |t| t.state = "receiving".into());

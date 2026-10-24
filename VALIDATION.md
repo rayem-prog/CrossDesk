@@ -1,6 +1,6 @@
 # CrossDesk 0.7.0 validation — 2026-10-24
 
-The new screen-edge drop path is independent of general clipboard publication. It scans a bounded source tree once, offers a validated manifest, waits for a destination and explicit consent, then streams encrypted bounded chunks with per-frame acknowledgments and SHA-256. Receive staging belongs to its selected parent; OS-enforced exclusive rename publishes a complete batch without replacement. Failed, cancelled and disconnected active batches remove owned staging. A successful rename remains saved even if a later acknowledgment fails. Path and snapshot sizes are bounded before reception.
+The new screen-edge drop path is independent of general clipboard publication. It scans a bounded source tree once, offers a validated manifest, waits for a destination and explicit consent, then streams encrypted bounded chunks with per-frame acknowledgments and SHA-256. Receive staging belongs to its selected parent; OS-enforced exclusive rename publishes a complete batch without replacement. Failed, cancelled and disconnected active batches remove owned staging. A successful rename remains saved even if a later acknowledgment fails. Windows raw filesystem calls normalize extended-length paths without requiring registry/manifest opt-in; destination failures are reported as failed, separately from explicit rejection. Path and snapshot sizes are bounded before reception.
 
 A fresh Noise connection attaches to the live primary session through a one-use 256-bit ticket on the same TCP port. Capability bit0x08 keeps v7 Hello dimensions and old-peer decoding unchanged. Pending handshakes are bounded to four with absolute deadlines. Lane failure preserves primary traffic; primary failure invalidates tickets and closes the lane. Runtime settings use lane status and do not change support negotiation.
 
@@ -8,7 +8,7 @@ Native source paths come only from Tauri drag/drop. Destination selection stays 
 
 ## Automated checks and limits
 
-- Final local GUI Rust: **252 passed / 5 ignored**; CLI Rust: **187 passed / 3 ignored**. Web: **44 passed**, production build passed; corresponding-source package regression: **1 passed**. Ignored comparison and large-streaming checks are selected separately; native Windows clipboard checks run only on CI.
+- Final local GUI Rust: **253 passed / 5 ignored**; CLI Rust: **188 passed / 3 ignored**. Web: **44 passed**, production build passed; corresponding-source package regression: **1 passed**. Ignored comparison and large-streaming checks are selected separately; native Windows clipboard checks run only on CI.
 - The release loopback comparison passed. Native CI and explicit large-streaming results are recorded in delivery evidence.
 - Engine regressions include consent before content, source mutation after offer, bounded ACK backpressure, simultaneous encrypted tree transfers, rejected/busy requests, source/destination limits, checksum cleanup, exclusive collision, offer/receive expiry, and disconnect cleanup/join.
 - Local IPC tests use an isolated child process to preserve Chinese, quotes and embedded newlines without injecting commands; malformed/oversized events are consumed rather than logged. Disconnect clears stale state.

@@ -45,10 +45,9 @@ pub(super) fn rename_exclusive(from: &Path, to: &Path) -> io::Result<()> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
-        let a: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
-        let b: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+        let a = crate::file_transfer::windows_native_path(from)?;
+        let b = crate::file_transfer::windows_native_path(to)?;
         // In particular, do not request MOVEFILE_REPLACE_EXISTING.
         if unsafe { MoveFileExW(a.as_ptr(), b.as_ptr(), 0) } != 0 {
             Ok(())
@@ -104,8 +103,8 @@ pub(super) fn available_space(path: &Path) -> io::Result<u64> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::ffi::OsStrExt;
-        let p: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let existing = std::fs::canonicalize(path)?;
+        let p = crate::file_transfer::windows_native_path(&existing)?;
         let mut free = 0;
         if unsafe {
             windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
