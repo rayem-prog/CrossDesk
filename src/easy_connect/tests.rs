@@ -1,6 +1,53 @@
 use super::*;
 use std::sync::{Arc, Mutex};
 struct MemoryService(Arc<Mutex<ServiceState>>);
+
+#[test]
+fn explicit_reconnect_replaces_a_stale_service_without_restarting_the_app() {
+    for platform in ["windows", "macos"] {
+        let mut nonce = [0; 8];
+        getrandom::getrandom(&mut nonce).unwrap();
+        let root = std::env::temp_dir().join(format!("crossdesk-reconnect-{nonce:x?}"));
+        let store = Arc::new(TrustedStore::new(root.clone()).unwrap());
+        store.stage([3; 16], &[8; 32]).unwrap();
+        store.commit([3; 16]).unwrap();
+        let state = Arc::new(Mutex::new(ServiceState::Stopped));
+        let mut core = Core::from_parts(
+            platform,
+            store.clone(),
+            Box::new(MemoryService(state.clone())),
+        )
+        .unwrap();
+        core.candidates = vec![Candidate {
+            id: [3; 16],
+            name: "peer".into(),
+            endpoints: vec!["127.0.0.1:24920".parse().unwrap()],
+            pairing_port: None,
+            protocol: crate::protocol::VERSION,
+        }];
+        core.tick().unwrap();
+        for stale in [
+            ServiceState::Listening,
+            ServiceState::Connecting,
+            ServiceState::Stopped,
+        ] {
+            *state.lock().unwrap() = ServiceState::Connected;
+            core.tick().unwrap();
+            // Repeated connect while healthy must not interrupt the live service.
+            core.connect().unwrap();
+            assert_eq!(*state.lock().unwrap(), ServiceState::Connected);
+            *state.lock().unwrap() = stale;
+            core.tick().unwrap();
+            core.connect().unwrap();
+            assert_eq!(*state.lock().unwrap(), ServiceState::Stopped);
+            core.tick().unwrap();
+            assert_eq!(*state.lock().unwrap(), ServiceState::Starting);
+            assert_eq!(store.paired().unwrap().unwrap().id, [3; 16]);
+        }
+        core.shutdown();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
 impl ServiceControl for MemoryService {
     fn start(
         &mut self,

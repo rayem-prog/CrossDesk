@@ -33,37 +33,82 @@ const TEXT_ORIGIN_FORMAT: &str = "org.crossdesk.clipboard.text-origin.v1";
 // OpenClipboard owner is valid for reads but cannot publish clipboard data.
 pub struct Clipboard {
     owner: usize,
+    owner_thread: Option<std::thread::JoinHandle<()>>,
+    owner_thread_id: u32,
 }
 
 impl Clipboard {
     pub fn new() -> std::io::Result<Self> {
-        Ok(Self { owner: 0 })
+        Ok(Self {
+            owner: 0,
+            owner_thread: None,
+            owner_thread_id: 0,
+        })
     }
 
     fn owner_window(&mut self) -> std::io::Result<windows_sys::Win32::Foundation::HWND> {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, HWND_MESSAGE};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, DispatchMessageW, GetMessageW, HWND_MESSAGE, MSG,
+            TranslateMessage,
+        };
         if self.owner == 0 {
-            let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
-            let owner = unsafe {
-                CreateWindowExW(
-                    0,
-                    class.as_ptr(),
-                    ptr::null(),
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    HWND_MESSAGE,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null(),
-                )
-            };
-            if owner.is_null() {
-                return Err(last_os_error("cannot create clipboard owner window"));
+            // Clipboard managers and other applications send synchronous messages
+            // to the owner. A transfer worker can be waiting on disk/network/condvars,
+            // so its window must have an independent, continuously running pump.
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let worker = std::thread::Builder::new()
+                .name("clipboard-owner".into())
+                .spawn(move || {
+                    let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+                    let owner = unsafe {
+                        CreateWindowExW(
+                            0,
+                            class.as_ptr(),
+                            ptr::null(),
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            HWND_MESSAGE,
+                            ptr::null_mut(),
+                            ptr::null_mut(),
+                            ptr::null(),
+                        )
+                    };
+                    if owner.is_null() {
+                        let _ = tx.send(Err(last_os_error("cannot create clipboard owner window")));
+                        return;
+                    }
+                    let thread_id =
+                        unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
+                    if tx.send(Ok((owner as usize, thread_id))).is_ok() {
+                        let mut msg: MSG = unsafe { zeroed() };
+                        while unsafe { GetMessageW(&mut msg, ptr::null_mut(), 0, 0) } > 0 {
+                            unsafe {
+                                TranslateMessage(&msg);
+                                DispatchMessageW(&msg);
+                            }
+                        }
+                    }
+                    unsafe {
+                        DestroyWindow(owner);
+                    }
+                })?;
+            match rx
+                .recv()
+                .map_err(|_| std::io::Error::other("clipboard owner thread stopped"))?
+            {
+                Ok((owner, id)) => {
+                    self.owner = owner;
+                    self.owner_thread_id = id;
+                    self.owner_thread = Some(worker);
+                }
+                Err(error) => {
+                    let _ = worker.join();
+                    return Err(error);
+                }
             }
-            self.owner = owner as usize;
         }
         Ok(self.owner as _)
     }
@@ -71,9 +116,10 @@ impl Clipboard {
 
 impl Drop for Clipboard {
     fn drop(&mut self) {
-        if self.owner != 0 {
-            unsafe {
-                windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(self.owner as _);
+        if let Some(worker) = self.owner_thread.take() {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
+            if unsafe { PostThreadMessageW(self.owner_thread_id, WM_QUIT, 0, 0) } != 0 {
+                let _ = worker.join();
             }
         }
     }
@@ -637,6 +683,36 @@ fn last_os_error(context: &str) -> std::io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clipboard_owner_remains_responsive_while_sync_worker_is_waiting() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_NULL,
+        };
+        let mut clipboard = Clipboard::new().unwrap();
+        let owner = clipboard.owner_window().unwrap() as usize;
+        // Only a private hidden window is used; the system clipboard is untouched.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sender = std::thread::spawn(move || {
+            let mut result = 0;
+            let response = unsafe {
+                SendMessageTimeoutW(
+                    owner as _,
+                    WM_NULL,
+                    0,
+                    0,
+                    SMTO_ABORTIFHUNG,
+                    300,
+                    &mut result,
+                )
+            };
+            tx.send(response != 0).unwrap();
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "clipboard owner cannot handle cross-thread Windows messages while worker waits"
+        );
+        sender.join().unwrap();
+    }
 
     #[test]
     fn text_decoder_rejects_invalid_utf16_and_preserves_unicode_with_lf() {
@@ -691,6 +767,25 @@ mod tests {
     fn native_windows_image_and_file_clipboard_round_trip() {
         assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
         let mut clipboard = Clipboard::new().unwrap();
+        clipboard
+            .write(&ClipboardPayload::Text("first remote copy".into()))
+            .unwrap();
+        // Replacing a remotely owned clipboard must not hang another thread/app.
+        // This also covers the publication/teardown path used on reconnect.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let other = thread::spawn(move || {
+            let mut clipboard = Clipboard::new().unwrap();
+            let result = clipboard.write(&ClipboardPayload::Text("Mac → Windows 中文 😀".into()));
+            tx.send(result).unwrap();
+        });
+        rx.recv_timeout(Duration::from_secs(3))
+            .expect("cross-thread clipboard publication blocked")
+            .unwrap();
+        other.join().unwrap();
+        assert_eq!(
+            clipboard.read().unwrap(),
+            Some(ClipboardPayload::Text("Mac → Windows 中文 😀".into()))
+        );
         clipboard.write(&ClipboardPayload::Bitmap(png())).unwrap();
         let Some(ClipboardPayload::Bitmap(received)) = clipboard.read().unwrap() else {
             panic!("image missing");
