@@ -126,6 +126,7 @@ impl ConnectPolicy {
     pub fn manual_connect(&mut self) {
         self.enabled = true;
         self.paused = false;
+        self.in_flight = false;
         self.retry_at = None;
         self.failures = 0;
     }

@@ -1,4 +1,15 @@
 use super::*;
+
+#[test]
+fn manual_reconnect_releases_the_previous_in_flight_attempt() {
+    let id = [29; 16];
+    let mut policy = ConnectPolicy::new(Some(id), true);
+    policy.started();
+    policy.connected();
+    assert!(!policy.should_connect(id, Instant::now()));
+    policy.manual_connect();
+    assert!(policy.should_connect(id, Instant::now()));
+}
 #[test]
 fn device_addresses_update_and_manual_disconnect_cannot_be_reversed_by_discovery() {
     let now = Instant::now();

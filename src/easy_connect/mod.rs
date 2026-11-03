@@ -595,6 +595,13 @@ impl Core {
         }) {
             return Err(io::Error::other(VERSION_MISMATCH));
         }
+        if self.phase == ServiceState::Connected {
+            return Ok(());
+        }
+        // An explicit retry replaces a stale listening/connecting/error service.
+        // Keep the GUI and trusted key; only the child owns the old transports.
+        self.backend.stop()?;
+        self.phase = ServiceState::Stopped;
         self.paused_by_user = false;
         self.policy.manual_connect();
         self.error = None;
